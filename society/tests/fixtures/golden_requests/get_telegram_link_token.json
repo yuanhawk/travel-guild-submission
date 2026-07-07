@@ -1,0 +1,8 @@
+{
+  "endpoint": "getTelegramLinkToken",
+  "method": "GET",
+  "path": "/telegram/link",
+  "kind": "query",
+  "note": "Query-param endpoint — has NO request body. Required gate: user_id AND a session_token that verify_session() accepts. This static fixture's session_token is a placeholder, NOT a live-issued token, so the backend contract test expects an honest 401 here (the field-presence gate passed and the token was actually checked).",
+  "query": { "user_id": "demo-lena", "session_token": "gr-session-token" }
+}

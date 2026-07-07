@@ -1,0 +1,8 @@
+{
+  "endpoint": "loginSession",
+  "method": "POST",
+  "path": "/session/login",
+  "kind": "body",
+  "note": "Issues a session_token for a KNOWN pre-seeded demo user (no register/signup).",
+  "body": { "user_id": "demo-lena" }
+}

@@ -1,0 +1,4 @@
+# gitleaksignore — fingerprints of confirmed-false-positive findings, keyed
+# to this repo's own commit history. Empty: this repo's single initial
+# commit scans clean without needing any allowlist entries here (see
+# .gitleaks.toml for the general false-positive allowlist rules instead).

@@ -1,0 +1,8 @@
+{
+  "endpoint": "placeCard",
+  "method": "POST",
+  "path": "/place_card",
+  "kind": "body",
+  "note": "THE DRIFT-CANARY. api.ts placeCard() sends field 'place', NOT 'name'. Backend utils/places_card.py:fetch_place_card reads body.get('name') or body.get('place') — this fixture pins that fallback. If the fallback is ever dropped, this test breaks.",
+  "body": { "mode": "detail", "place": "Senso-ji", "city": "tokyo" }
+}

@@ -1,0 +1,301 @@
+# intent_phrasings.jsonl — regression corpus for parse_intent (LLM-OFF).
+#
+# PROCESS NOTE (2026-07-03 postmortem, #192/#193): every parser bugfix MUST add
+# a corpus row here, not just an instance test in test_intent_parser.py — the
+# corpus is the systematic regression net; an instance test alone lets this
+# net silently drift out of use. #192 ("with my wife and 2 kids" undercounting
+# adults) and #193 ("April 10 to April 15" date-range duration parse failure)
+# both landed as fixes with ZERO corpus rows added, despite this file existing
+# precisely to catch this class of bug. Do not repeat that mistake.
+#
+# One JSON object per line. Fields:
+#   id       : unique kebab-case identifier
+#   category : destination_city | destination_country | destination_region |
+#              destination_directional | multi_city | origin | duration |
+#              date_specific | date_month | date_inquiry | budget_explicit |
+#              filler | greeting | vibe | unsupported | party_composition |
+#              date_range
+#   text     : the raw free-text utterance
+#   context  : {"today": "YYYY-MM-DD"} for deterministic relative-date tests
+#   expect   : {
+#                outcome: resolve|clarify|decline|no_filler_in_decline
+#                cities        : [exact ordered list]          (resolve)
+#                cities_include: [must appear in cities]       (resolve)
+#                cities_exclude: [must NOT appear in cities]   (resolve)
+#                cities_any_of : [at least one must appear]    (resolve)
+#                min_city_count: N                             (resolve)
+#                checkin_year  : YYYY                         (resolve)
+#                checkin_month : MM                           (resolve)
+#                budget_min_cents: N                          (resolve)
+#                adults        : N          (resolve; #202, postmortem #192)
+#                nights        : N          (resolve; #202, postmortem #193)
+#                slot          : date|budget|destination|...  (clarify)
+#                filler_tokens : [...]  (no_filler_in_decline)
+#              }
+#   xfail       : true  (row expected to FAIL until named phase is done)
+#   xfail_reason: string
+#   notes    : free-text rationale
+
+# ============================================================
+# THE FIVE LIVE-BREAKAGE ROWS (must-pass after all RC fixes)
+# ============================================================
+
+{"id":"breakage-01","category":"filler","text":"Ok sure, I will like to go, Sure, to Bangkok, $2000, 5 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"filler_tokens":["ok","sure"]},"notes":"RC-2: 'Ok'/'Sure' in destination-position must not be flagged as unknown city; resolve to Bangkok"}
+
+{"id":"breakage-02","category":"destination_region","text":"14 day Nordic travel, $5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_any_of":["oslo","stockholm","copenhagen","helsinki","reykjavik"],"min_city_count":2},"notes":"RC-3: 'nordic' was unrecognised before fix → declined for DESTINATION; now resolves to multi-city Nordic anchors"}
+
+{"id":"breakage-03","category":"origin","text":"I'm located in Singapore, I want to visit Bali beach, RM 5000, 5 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["bali"],"cities_exclude":["singapore"]},"notes":"RC-1: Singapore is origin (located-in cue), not destination; RM 5000 (MYR) parsed correctly; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"breakage-04","category":"origin","text":"starting from Stockholm, visiting Norway, March 2027, 14 days, $5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["oslo"],"cities_exclude":["stockholm"],"checkin_year":2027,"checkin_month":3},"notes":"RC-1+RC-3b+RC-5a: Stockholm=origin (starting-from cue), Norway→oslo gateway, March 2027 binds year=2027"}
+
+{"id":"breakage-05","category":"date_inquiry","text":"suggest a good date for visiting Bangkok, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"date"},"notes":"RC-5b: date-inquiry phrase → CLARIFY(DATE); no explicit date in text so gate fires"}
+
+# ============================================================
+# FABLE REVIEW BATCH B — 4 concrete reproduced mis-parses (must-pass)
+# ============================================================
+
+{"id":"fableB-01","category":"destination_country","text":"a week in Jamaica, $3000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["kingston"]},"notes":"BUG 1 (most severe — silent wrong-country resolve): catalog city 'jamaica' (Queens, NY) coincidentally shares its name with the country Jamaica (Caribbean nation, gateway Kingston). Previously _scan_city_sequence found the Queens match first so the country-fallback path never fired, silently resolving to Queens/US. Must resolve to Kingston, dest_country JM."}
+
+{"id":"fableB-02","category":"destination_country","text":"5 nights in Jamaica, USA, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["jamaica"]},"notes":"BUG 1 companion: a genuine US-disambiguated mention of 'Jamaica' must still resolve to the catalog city (Queens, NY), not be forced to the country gateway — the collision fix only fires when there is NO disambiguating cue."}
+
+{"id":"fableB-03","category":"unsupported","text":"I want a quiet week of reading, somewhere warm, $2000, 7 nights","context":{"today":"2026-07-03"},"expect":{"outcome":"clarify","slot":"destination"},"notes":"BUG 2: the bare gerund 'reading' (no destination cue) previously silently resolved to Reading, UK. 'reading' now requires a destination cue like the other ambiguous common-word cities (nice/bath/mobile) → honest CLARIFY(DESTINATION), not a silent mis-resolve."}
+
+{"id":"fableB-04","category":"destination_city","text":"5 nights in Reading, England, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["reading"]},"notes":"BUG 2 companion: a genuinely-intended Reading trip still resolves correctly once a destination cue ('in') is present — the ambiguous-word fix does not break real Reading requests."}
+
+{"id":"fableB-05","category":"destination_city","text":"5 nights in Ho Chi Minh City, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["ho chi minh city"]},"notes":"BUG 3: _scan_unknown_place's place-token regex caps at 2 ASCII-capitalised words, so it previously mangled this to 'Ho Chi' and falsely declined a destination _scan_city_sequence had already resolved correctly. Fixed by yielding to already-resolved spans."}
+
+{"id":"fableB-06","category":"destination_city","text":"5 nights in Malé, beach, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["malé"]},"notes":"BUG 3: non-ASCII city name ('é') previously mangled to 'Mal' by the same 2-ASCII-word regex and falsely declined despite being a real catalog city."}
+
+{"id":"fableB-07","category":"destination_city","text":"5 nights in Saigon, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["ho chi minh city"]},"notes":"Alias-table gap found alongside BUG 3: 'Saigon' (the common colloquial/historical name) now maps to the Ho Chi Minh City catalog entry."}
+
+{"id":"fableB-08","category":"date_month","text":"trip to Nice in May, 5 nights, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["nice"],"checkin_year":2027,"checkin_month":5},"notes":"BUG 4 regression: bare month-name-only date (no day given), today is AFTER May so the year-less date must roll forward to next year. Goes through the SAME _scan_start_date_raw/_maybe_roll mechanism as day-level dates (merged fix/honesty-gaps-batch-A) — already correct pre-fix; this row locks in the regression."}
+
+# ============================================================
+# destination_city
+# ============================================================
+
+{"id":"city-01","category":"destination_city","text":"5 nights in Bangkok, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"]},"notes":"plain single-city with nights + budget"}
+
+{"id":"city-02","category":"destination_city","text":"a week in Tokyo, under $3000, solo","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"]},"notes":"word-form duration, 'under' budget cue"}
+
+{"id":"city-03","category":"destination_city","text":"7 nights in Bali beach for 2 people, $4000 AUD","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"],"budget_min_cents":100000},"notes":"AUD currency, adults=2; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"city-04","category":"destination_city","text":"book me 10 nights in Singapore, SGD 3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["singapore"]},"notes":"SGD currency + 'book me' imperative"}
+
+{"id":"city-05","category":"destination_city","text":"I'd like to go to Paris for 6 nights, $2500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["paris"]},"notes":"polite phrasing with 'like to go to'"}
+
+# ============================================================
+# destination_country
+# ============================================================
+
+{"id":"country-01","category":"destination_country","text":"7 nights in Japan, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"]},"notes":"Japan → tokyo gateway"}
+
+{"id":"country-02","category":"destination_country","text":"two weeks in Norway, $5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["oslo"]},"notes":"RC-3b: norway → oslo gateway (newly added)"}
+
+{"id":"country-03","category":"destination_country","text":"5 nights in Finland, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["helsinki"]},"notes":"RC-3b: finland → helsinki gateway"}
+
+{"id":"country-04","category":"destination_country","text":"10 days in Iceland, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["reykjavik"]},"notes":"RC-3b: iceland → reykjavik gateway"}
+
+# ============================================================
+# destination_region
+# ============================================================
+
+{"id":"region-01","category":"destination_region","text":"2 weeks in Scandinavia, $6000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_any_of":["copenhagen","oslo","stockholm"],"min_city_count":2},"notes":"scandinavia region → multi-city"}
+
+{"id":"region-02","category":"destination_region","text":"10 days in Eastern Europe, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_any_of":["prague","vienna","budapest"],"min_city_count":2},"notes":"eastern europe multi-country region"}
+
+{"id":"region-03","category":"destination_region","text":"12 days in Central Japan, culture, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["nagoya"],"min_city_count":2},"notes":"sub-national Japan region"}
+
+{"id":"region-04","category":"destination_region","text":"the nordics for 2 weeks, $7000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_any_of":["oslo","stockholm","copenhagen","helsinki","reykjavik"],"min_city_count":2},"notes":"RC-3: 'the nordics' alias → multi-city Nordic expansion"}
+
+{"id":"region-05","category":"destination_region","text":"10 days in Tuscany, culture, $3500 EUR","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["florence"],"min_city_count":2},"notes":"Italian sub-region + EUR currency; 'culture' vibe bypasses multi-area gate"}
+
+# ============================================================
+# destination_directional
+# ============================================================
+
+{"id":"directional-01","category":"destination_directional","text":"7 nights in northern Vietnam, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["hanoi"]},"notes":"directional prefix → hanoi gateway"}
+
+{"id":"directional-02","category":"destination_directional","text":"10 days in western Japan, culture, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_any_of":["osaka","kyoto"]},"notes":"western japan directional"}
+
+{"id":"directional-03","category":"destination_directional","text":"a week in southern Thailand, $1800","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_any_of":["phuket","krabi","hat yai","bangkok"]},"notes":"southern thailand directional gateway"}
+
+# ============================================================
+# multi_city
+# ============================================================
+
+{"id":"multi-01","category":"multi_city","text":"Bangkok then Kuala Lumpur then Singapore, 14 nights, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok","kuala lumpur","singapore"]},"notes":"explicit ordered 3-city list with 'then'"}
+
+{"id":"multi-02","category":"multi_city","text":"Perth, Margaret River, Albany — 10 nights, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["perth","margaret-river","albany"]},"notes":"WA road-trip with em-dash separator"}
+
+{"id":"multi-03","category":"multi_city","text":"fly to Tokyo then Kyoto, 12 nights, $4500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["tokyo","kyoto"],"min_city_count":2},"notes":"two JP cities in order"}
+
+{"id":"multi-04","category":"multi_city","text":"Oslo and Stockholm and Copenhagen, 2 weeks, $5500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["oslo","stockholm","copenhagen"],"min_city_count":3},"notes":"Nordic triple with 'and' separators"}
+
+# ============================================================
+# origin (RC-1)
+# ============================================================
+
+{"id":"origin-01","category":"origin","text":"trip starting from Stockholm, going to Oslo, 14 days, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["oslo"],"cities_exclude":["stockholm"]},"notes":"RC-1: 'starting from' cue → stockholm=origin, oslo=destination"}
+
+{"id":"origin-02","category":"origin","text":"based in Bangkok, visiting Bali beach for 7 nights, $2500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["bali"],"cities_exclude":["bangkok"]},"notes":"RC-1: 'based in' cue → bangkok=origin; 'beach' vibe + unhyphenated duration"}
+
+{"id":"origin-03","category":"origin","text":"I live in Singapore, want to visit Tokyo for 10 nights, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["tokyo"],"cities_exclude":["singapore"]},"notes":"RC-1: 'i live in' cue → singapore=origin"}
+
+{"id":"origin-04","category":"origin","text":"flying out of Kuala Lumpur to Bali beach for 5 nights, $1500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["bali"],"cities_exclude":["kuala lumpur"]},"notes":"RC-1: 'flying out of' cue → kuala lumpur=origin; 'beach' vibe bypasses multi-area gate"}
+{"id":"origin-adv-01","category":"origin","text":"a break from work, Tokyo to Kyoto, $3000, 5 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["tokyo","kyoto"]},"notes":"RC-1 adversarial: 'from work' — work is not a city → no origin suppression → both Tokyo and Kyoto must resolve as destinations"}
+{"id":"origin-adv-02","category":"origin","text":"i live in a small town, dreaming of Bali beach, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["bali"]},"notes":"RC-1 adversarial: 'i live in' cue + 'a small' (not a city after article skip) → no origin suppression → Bali resolves; 'beach' vibe bypasses multi-area gate"}
+{"id":"origin-adv-03","category":"origin","text":"escape from it all, Bangkok to Phuket, $1500, 5 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["bangkok","phuket"]},"notes":"RC-1 adversarial: 'from it' — 'it' is not a city → no origin suppression → Bangkok and Phuket both resolve as destinations"}
+{"id":"origin-adv-04","category":"origin","text":"from Paris to Rome, 8 days, €2500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["rome"],"cities_exclude":["paris"]},"notes":"RC-1 adjacent-positive: Paris is cue-adjacent after 'from' + 'to' follows → paris=origin suppressed; Rome resolves as destination"}
+
+# ============================================================
+# duration
+# ============================================================
+
+{"id":"duration-01","category":"duration","text":"a fortnight in Bali beach, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"]},"notes":"'fortnight' = 14 nights; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"duration-02","category":"duration","text":"long weekend in Singapore, city, $800","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["singapore"]},"notes":"'long weekend' = 3 nights"}
+
+{"id":"duration-03","category":"duration","text":"no duration info, just Bangkok, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"duration"},"notes":"city+budget but no duration → CLARIFY(DURATION)"}
+
+# ============================================================
+# date_specific (RC-5a)
+# ============================================================
+
+{"id":"date-01","category":"date_specific","text":"trip to Bangkok in March 2027, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"checkin_year":2027,"checkin_month":3},"notes":"RC-5a: 'March 2027' → year=2027 not 2026-03-20 (the critical fix)"}
+
+{"id":"date-02","category":"date_specific","text":"fly to Tokyo on 2027-01-15, 10 nights, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"],"checkin_year":2027,"checkin_month":1},"notes":"ISO date form → year 2027"}
+
+{"id":"date-03","category":"date_specific","text":"Bali beach trip starting December 2027, 12 nights, $3500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"],"checkin_year":2027,"checkin_month":12},"notes":"RC-5a: 'December 2027' correctly bound; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"date-04","category":"date_specific","text":"visit Kyoto in February 2027, 5 nights, $2800","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["kyoto"],"checkin_year":2027,"checkin_month":2},"notes":"RC-5a: 'February 2027' correctly bound"}
+
+# ============================================================
+# date_month
+# ============================================================
+
+{"id":"datemon-01","category":"date_month","text":"going to Bangkok in October, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"checkin_month":10},"notes":"bare month 'October' with 'in' cue → month 10 of reference year; Bangkok avoids multi-area gate"}
+
+{"id":"datemon-02","category":"date_month","text":"Bangkok trip starting in November, 5 nights, $1800","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"checkin_month":11},"notes":"'starting in November' → month 11; Bangkok avoids multi-area gate"}
+
+# ============================================================
+# date_inquiry (RC-5b)
+# ============================================================
+
+{"id":"dateinq-01","category":"date_inquiry","text":"when should I visit Bangkok? 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"date"},"notes":"RC-5b: 'when should I visit' → CLARIFY(DATE)"}
+
+{"id":"dateinq-02","category":"date_inquiry","text":"what's the best time to go to Tokyo, 10 nights, $3500","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"date"},"notes":"RC-5b: 'best time to go' → CLARIFY(DATE)"}
+
+{"id":"dateinq-03","category":"date_inquiry","text":"best time to visit Singapore? budget $2500, 7 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"date"},"notes":"RC-5b: 'best time to visit' → CLARIFY(DATE)"}
+
+# ============================================================
+# budget_explicit
+# ============================================================
+
+{"id":"budget-01","category":"budget_explicit","text":"7 nights Bangkok, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"budget_min_cents":200000},"notes":"USD budget"}
+
+{"id":"budget-02","category":"budget_explicit","text":"5 nights Bali beach, RM 8000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"],"budget_min_cents":100000},"notes":"MYR budget → USD cents (0.22 rate, 8000 MYR ≈ $1760 = 176000¢); 'beach' bypasses multi-area gate"}
+
+{"id":"budget-03","category":"budget_explicit","text":"10 nights Tokyo, AUD 5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"],"budget_min_cents":200000},"notes":"AUD budget → USD cents (0.66 rate)"}
+
+{"id":"budget-04","category":"budget_explicit","text":"no budget here, just 7 nights in Bangkok","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"budget"},"notes":"missing budget → CLARIFY(BUDGET)"}
+
+# ============================================================
+# filler (RC-2)
+# ============================================================
+
+{"id":"filler-01","category":"filler","text":"Ok sure, I will like to go $1600 for the booking","context":{"today":"2026-10-01"},"expect":{"outcome":"no_filler_in_decline","filler_tokens":["ok","sure"]},"notes":"RC-2: no city in text; 'Ok'/'sure' must NOT be quoted as unknown destination in decline reason"}
+
+{"id":"filler-02","category":"filler","text":"Hi, I want to go to Bangkok, $2000, 7 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"]},"notes":"RC-2: 'Hi' at start; resolve to Bangkok normally"}
+
+{"id":"filler-03","category":"filler","text":"Hey, so I'd like to visit Tokyo for 10 nights, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"]},"notes":"RC-2: 'Hey'/'so' fillers before real request; resolve to tokyo"}
+
+{"id":"filler-04","category":"filler","text":"yeah okay, book me Singapore for 5 nights, $1500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["singapore"]},"notes":"RC-2: 'yeah'/'okay' fillers; resolve to singapore"}
+
+{"id":"filler-05","category":"filler","text":"hmm maybe Bangkok beach, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"]},"notes":"RC-2: 'hmm'/'maybe' before city; resolve to bangkok"}
+
+# ============================================================
+# greeting
+# ============================================================
+
+{"id":"greet-01","category":"greeting","text":"Hello! I want to visit Bali beach for 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"]},"notes":"'Hello!' greeting then valid request; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"greet-02","category":"greeting","text":"Hi there, I want to plan 10 nights in Tokyo, $3500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"]},"notes":"'Hi there' greeting; unhyphenated duration; resolve to tokyo"}
+
+# ============================================================
+# vibe
+# ============================================================
+
+{"id":"vibe-01","category":"vibe","text":"7 nights Bali relax then beach, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities_include":["bali"]},"notes":"vibe sequence 'relax then beach' → 2 legs for Bali"}
+
+{"id":"vibe-02","category":"vibe","text":"10 nights Bangkok city vibes, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"]},"notes":"'city vibes' → city vibe on single leg"}
+
+{"id":"vibe-03","category":"vibe","text":"5 nights Bali luxury, $5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"]},"notes":"luxury vibe on bali"}
+
+# ============================================================
+# unsupported
+# ============================================================
+
+{"id":"unsup-01","category":"unsupported","text":"7 nights in Gondor, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"decline"},"notes":"fictional destination → honest decline for unknown city"}
+
+{"id":"unsup-02","category":"unsupported","text":"visit North Korea for 5 nights, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"decline"},"notes":"excluded destination (honesty exclude) → decline"}
+
+{"id":"unsup-03","category":"unsupported","text":"I want to go somewhere nice, $2000, 7 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"destination"},"notes":"no recognisable destination → CLARIFY(DESTINATION)"}
+
+# ============================================================
+# party_composition (#202 — postmortem for #192, "with my wife and 2 kids")
+# ============================================================
+
+{"id":"party-01","category":"party_composition","text":"5 nights in Osaka with my wife and 2 kids, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["osaka"],"adults":2},"notes":"#192 EXACT live-test phrase: naming a spouse (no numeric token) infers speaker+wife=2 adults via the companion-word check in _scan_adults_raw; kids are handled separately (disclosure only, never priced as adults)"}
+
+{"id":"party-02","category":"party_composition","text":"family of 4, 5 nights in Bangkok, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"adults":4},"notes":"'family of N' numeric pattern prices all N as adults (pre-existing, unrelated to the #192 companion-word fix)"}
+
+{"id":"party-03","category":"party_composition","text":"me and my mom, 5 nights in Paris, $2500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["paris"],"adults":2},"notes":"#208 FIXED: _scan_adults_raw's companion-word check broadened from 'my wife/husband/spouse/partner' to also include a small closed set of close-relative words (mom/mum/dad/mother/father/sister/brother), so 'my mom' now infers speaker+mom=2 adults the same way 'my wife' already did"}
+
+{"id":"party-04","category":"party_composition","text":"3 couples, 10 nights in Bali beach, $6000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"],"adults":6},"notes":"#208 FIXED: added a dedicated `(\\d+)\\s+couples` → 2*N pattern in _scan_adults_raw, checked separately from (and before) the pre-existing singular `\\bcouple\\b` → 2 check, so plural 'N couples' phrasing now multiplies correctly; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"party-05","category":"party_composition","text":"solo trip to Tokyo, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"],"adults":1},"notes":"'solo' keyword → explicit adults=1 (pre-existing pattern)"}
+
+{"id":"party-06","category":"party_composition","text":"just the two of us, 5 nights in Rome, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["rome"],"adults":2},"notes":"#208 FIXED: _scan_adults_raw's '<N> of us' pattern extended with a small closed word-number set (two/three) alongside the existing numeric-digit form, so 'the two of us' now resolves the same as '2 of us' — word-number party phrasing, no spouse/partner cue word present"}
+
+{"id":"party-07","category":"party_composition","text":"husband and I with our toddler, 7 nights in Bangkok, $3500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"adults":2},"notes":"#208 FIXED: _scan_adults_raw's companion-word check now also matches '<companion-word> and I' (no 'my' possessive required), tightly anchored to the closed companion-word set so unrelated 'X and I' phrasing does not false-positive"}
+
+{"id":"party-08","category":"party_composition","text":"traveling with my partner and 2 children, 7 nights in Bali beach, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"],"adults":2},"notes":"'my partner' companion-word cue (#192 fix) correctly infers 2 adults; the 2 children are tracked separately (disclosure only) and never folded into adults pricing; 'beach' vibe bypasses multi-area gate"}
+
+{"id":"party-09","category":"party_composition","text":"group of 5 friends, 10 nights in Bangkok, $5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"adults":5},"notes":"'group of N' numeric pattern (pre-existing, unrelated to the #192 companion-word fix)"}
+
+{"id":"party-10","category":"party_composition","text":"myself, my wife, and our 3 kids, 7 nights in Bangkok, $5000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"adults":2},"notes":"#192 companion-word cue ('my wife') correctly infers 2 adults even with children also named in the same sentence; the 3 kids are disclosure-only"}
+
+{"id":"party-11","category":"party_composition","text":"a couple, 5 nights in Paris, $2500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["paris"],"adults":2},"notes":"singular 'couple' keyword → explicit adults=2 (pre-existing pattern; contrast with party-04's plural 'couples' → 2*N multiplier, #208)"}
+
+{"id":"party-12","category":"party_composition","text":"single traveler, 5 nights in Tokyo, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"],"adults":1},"notes":"'single traveler' has no recognised explicit-count keyword and resolves via the adults=1 default — verified this coincides with the honestly-correct answer, so not an xfail even though the signal isn't 'explicit' internally"}
+
+# ============================================================
+# date_range (#202 — postmortem for #193, "April 10 to April 15")
+# ============================================================
+
+{"id":"daterange-01","category":"date_range","text":"Osaka April 10 to April 15, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["osaka"],"nights":5},"notes":"#193 EXACT live-test phrase (city-qualified): explicit unambiguous date range with 'to' join word → _scan_date_range_nights derives 5 nights"}
+
+{"id":"daterange-02","category":"date_range","text":"trip to Osaka from the 10th until the 15th of May, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["osaka"],"nights":5},"notes":"#208 FIXED: added a self-contained fallback pattern (_scan_date_range_nights_fallback, only reached when the strict primary pass finds nothing) matching 'the Nth to/through/until/til the Mth of Month' and computing nights as a plain day-number subtraction; scoped to this fallback only so the shared _DATE_PHRASE_RE/_DATE_RANGE_JOIN_RE used elsewhere are untouched"}
+
+{"id":"daterange-03","category":"date_range","text":"Osaka Apr 10-15, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["osaka"],"nights":5},"notes":"#208 FIXED: added a self-contained fallback pattern (_scan_date_range_nights_fallback) matching compact 'Month D-D' shorthand and computing nights as a plain day-number subtraction, so the bare trailing day after the hyphen inherits the month from the first side; common compact range notation ('Apr 10-15') now supported"}
+
+{"id":"daterange-04","category":"date_range","text":"Bangkok June 3 through June 8, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bangkok"],"nights":5},"notes":"'through' join word variant of the #193 fix (locks in the alternate join-word branch, not just 'to')"}
+
+{"id":"daterange-05","category":"date_range","text":"Bali beach staying from July 1 to July 8, $2500","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["bali"],"nights":7},"notes":"7-night range (distinct span from the other rows, guards against a hardcoded-5 regression); 'beach' vibe bypasses multi-area gate"}
+
+{"id":"daterange-06","category":"date_range","text":"connecting to my next flight, Bangkok, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"duration"},"notes":"ADVERSARIAL NEGATIVE: no night count and no date phrase at all on either side of 'to' — must NOT be mistaken for a date range (neither side parses as a date via _parse_date_raw) and must honestly clarify for duration rather than fabricate one"}
+
+{"id":"daterange-07","category":"date_range","text":"drive to the airport, Bangkok, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"duration"},"notes":"ADVERSARIAL NEGATIVE: second 'X to Y' non-date phrasing (per the #193 fix's own commit message example) — same honest CLARIFY(duration), no fabricated range"}
+
+{"id":"daterange-08","category":"date_range","text":"Osaka December 20 to January 5, $3000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"duration"},"notes":"GENUINE AMBIGUOUS/MALFORMED case, by design (not a bug): both year-less dates anchor to the same _REFERENCE_YEAR, so 'December 20 to January 5' computes a NEGATIVE span; _scan_date_range_nights deliberately rejects non-positive spans rather than guess at a year-rollover, so this honestly falls through to CLARIFY(duration) instead of resolving a fabricated backwards-then-corrected duration"}
+
+# ============================================================
+# XFAIL rows — known Phase 2 gaps (honest about deferred features)
+# ============================================================
+
+{"id":"xfail-budgetinq-01","category":"budget_explicit","text":"what budget would you recommend for 7 nights in Tokyo?","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"budget","inquiry_phrase_in_question":true},"xfail":true,"xfail_reason":"budget-inquiry meta-detection deferred to Phase 2: Phase 2 would respond with a tailored budget estimate; current behavior returns standard 'state a budget' clarification without echoing the inquiry context"}
+
+{"id":"xfail-budgetinq-02","category":"budget_explicit","text":"14 day Nordic travel, what is the budget","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"budget","inquiry_phrase_in_question":true},"xfail":true,"xfail_reason":"budget-inquiry meta-detection deferred to Phase 2: after RC-3 nordic resolves and 'what is the budget' is correctly declined for BUDGET, but Phase 2 would detect the inquiry phrasing and provide a Nordic budget estimate"}
+
+{"id":"xfail-fx-inquiry-01","category":"budget_explicit","text":"how much is $3000 in Thai baht for a Bangkok trip, 7 nights?","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"currency","fx_conversion_shown":true},"xfail":true,"xfail_reason":"FX-inquiry detection deferred to Phase 2: user is asking for a currency conversion; current system does not detect this as a currency inquiry and treats it as a standard budget parse"}

@@ -1,0 +1,12 @@
+# Local secret-scanning gate -- this showcase repo does not ship a CI
+# workflow, so this pre-commit hook is the only automated scan gate.
+#
+# Activate on a fresh clone:
+#   pip install pre-commit && pre-commit install
+#
+# Version pinned to a known-good gitleaks release (v8.21.2).
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

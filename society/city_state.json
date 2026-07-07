@@ -1,0 +1,13 @@
+{
+ "entry_count": 7,
+ "provenance": "Sample data for this showcase repo (not the full SimpleMaps World Cities dataset; see DATA-ATTRIBUTIONS.md).",
+ "states": {
+  "ubud": "Bali",
+  "seminyak": "Bali",
+  "legian": "Bali",
+  "canggu": "Bali",
+  "singapore": "",
+  "tokyo": "Tokyo",
+  "bangkok": "Bangkok"
+ }
+}

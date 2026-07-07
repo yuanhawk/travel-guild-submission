@@ -1,0 +1,8 @@
+{
+  "endpoint": "getPreferences",
+  "method": "GET",
+  "path": "/preferences",
+  "kind": "query",
+  "note": "Query-param endpoint — has NO request body. Required gate: user_id.",
+  "query": { "user_id": "demo-lena" }
+}

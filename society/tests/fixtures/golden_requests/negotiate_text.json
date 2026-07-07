@@ -1,0 +1,18 @@
+{
+  "endpoint": "negotiateText",
+  "method": "POST",
+  "path": "/negotiate_text",
+  "kind": "body",
+  "note": "FE api.ts negotiateText() spreads {...body, ...authFields()} (M1 follow-up, security review — previously owner_token only). session_token here does NOT change trip-ownership semantics (still gated at /confirm); it is consumed once, narrowly, to gate the travel_memory personalization write/read (server.py _memory_verified_user_id). The heavy orchestrator entrypoint (utils.intent_parser.negotiate_from_text) is stubbed in the backend test; every other endpoint short-circuits before it.",
+  "body": {
+    "text": "7 days in Tokyo, culture, $2000, couple",
+    "plan": true,
+    "user_id": "demo-lena",
+    "nationality": "SG",
+    "wallet_balance_cents": 500000,
+    "live_emergency": { "check": true },
+    "narrate": false,
+    "owner_token": "gr-owner-token",
+    "session_token": "gr-session-token"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "endpoint": "listDemoUsers",
+  "method": "POST",
+  "path": "/session",
+  "kind": "body",
+  "note": "api.ts listDemoUsers() POSTs an empty body {} — no user_id means 'list the pre-seeded demo users'.",
+  "body": {}
+}

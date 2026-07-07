@@ -1,0 +1,64 @@
+[
+ {
+  "id": "food-tokyo-ramen-midnight",
+  "merchant_name": "Sample Midnight Ramen (demo data)",
+  "item": "Shoyu Ramen",
+  "city": "tokyo",
+  "country": "Japan",
+  "price_cents": 890,
+  "delivery_window": "22:00-02:00",
+  "diet": [],
+  "min_order_cents": 890,
+  "delivery_fee_cents": 400
+ },
+ {
+  "id": "food-singapore-laksa-supper",
+  "merchant_name": "Sample Laksa Corner (demo data)",
+  "item": "Laksa",
+  "city": "singapore",
+  "country": "Singapore",
+  "price_cents": 720,
+  "delivery_window": "18:00-23:00",
+  "diet": [],
+  "min_order_cents": 720,
+  "delivery_fee_cents": 350
+ },
+ {
+  "id": "food-hanoi-pho-night",
+  "merchant_name": "Sample Late Night Pho (demo data)",
+  "item": "Pho Bo",
+  "city": "hanoi",
+  "country": "Vietnam",
+  "price_cents": 470,
+  "delivery_window": "20:00-01:00",
+  "diet": [],
+  "min_order_cents": 470,
+  "delivery_fee_cents": 200
+ },
+ {
+  "id": "food-bangkok-padthai-supper",
+  "merchant_name": "Sample Riverside Pad Thai (demo data)",
+  "item": "Pad Thai",
+  "city": "bangkok",
+  "country": "Thailand",
+  "price_cents": 400,
+  "delivery_window": "17:00-22:00",
+  "diet": [],
+  "min_order_cents": 400,
+  "delivery_fee_cents": 200
+ },
+ {
+  "id": "food-bali-vegan-bowl-ubud",
+  "merchant_name": "Sample Ubud Vegan Kitchen (demo data)",
+  "item": "Vegan Buddha Bowl",
+  "city": "bali",
+  "country": "Indonesia",
+  "price_cents": 650,
+  "delivery_window": "11:00-21:00",
+  "diet": [
+   "vegan"
+  ],
+  "min_order_cents": 650,
+  "delivery_fee_cents": 250
+ }
+]

@@ -1,0 +1,16 @@
+{
+  "endpoint": "refineTrip",
+  "method": "POST",
+  "path": "/refine",
+  "kind": "body",
+  "note": "Conversational follow-up on a held plan. Required gate: idempotency_key AND message. authFields() spread (AFTER body) adds session_token+owner_token.",
+  "body": {
+    "idempotency_key": "gr-refine-key",
+    "message": "make it cheaper",
+    "session_id": "gr-session-id",
+    "user_id": "demo-lena",
+    "wallet_balance_cents": 500000,
+    "session_token": "gr-session-token",
+    "owner_token": "gr-owner-token"
+  }
+}

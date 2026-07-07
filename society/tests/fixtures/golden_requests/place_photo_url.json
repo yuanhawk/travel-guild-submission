@@ -1,0 +1,8 @@
+{
+  "endpoint": "placePhotoUrl",
+  "method": "GET",
+  "path": "/place_photo",
+  "kind": "url_only",
+  "note": "placePhotoUrl(ref) only BUILDS an <img src> string; it issues no fetch. The FE test asserts URL construction (and that no fetch call happened); the backend test issues a REAL GET with this ref — a bogus/unknown ref must honestly 404 (proving the 'ref' gate passes and a genuine domain outcome is reached, not a crash).",
+  "query": { "ref": "gr-opaque-photo-ref" }
+}

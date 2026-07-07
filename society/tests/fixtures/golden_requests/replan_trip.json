@@ -1,0 +1,16 @@
+{
+  "endpoint": "replanTrip",
+  "method": "POST",
+  "path": "/replan",
+  "kind": "body",
+  "note": "Item-level structured edit on a held/booked plan's day_plans. Required gate: idempotency_key AND a non-empty ops list. authFields() spread adds session_token+owner_token.",
+  "body": {
+    "idempotency_key": "gr-replan-key",
+    "ops": [
+      { "op": "remove_place", "leg_index": 0, "day_index": 0, "position": 0, "attraction_ref": "senso-ji" }
+    ],
+    "user_id": "demo-lena",
+    "session_token": "gr-session-token",
+    "owner_token": "gr-owner-token"
+  }
+}

@@ -1,0 +1,340 @@
+{
+ "cities": {
+  "ID:ubud": {
+   "attractions": [
+    {
+     "category": "tourism=attraction",
+     "lat": -8.5188,
+     "lon": 115.2588,
+     "name": "Sample Monkey Forest (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=terrace",
+     "lat": -8.4315,
+     "lon": 115.2778,
+     "name": "Sample Rice Terrace Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "historic=palace",
+     "lat": -8.4953,
+     "lon": 115.2653,
+     "name": "Sample Water Palace (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "tourism=museum",
+     "lat": -8.5069,
+     "lon": 115.2625,
+     "name": "Sample Art Museum Ubud (demo data)",
+     "weather_exposure": "indoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "restaurant",
+     "cuisine": "indonesian",
+     "lat": -8.507,
+     "lon": 115.263,
+     "name": "Sample Warung Local (demo data)"
+    },
+    {
+     "category": "cafe",
+     "cuisine": "vegetarian",
+     "lat": -8.509,
+     "lon": 115.261,
+     "name": "Sample Organic Cafe (demo data)"
+    },
+    {
+     "category": "restaurant",
+     "cuisine": "asian",
+     "lat": -8.51,
+     "lon": 115.264,
+     "name": "Sample Riverside Grill (demo data)"
+    }
+   ]
+  },
+  "ID:seminyak": {
+   "attractions": [
+    {
+     "category": "leisure=beach_resort",
+     "lat": -8.6905,
+     "lon": 115.165,
+     "name": "Sample Beach Club (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=beach",
+     "lat": -8.695,
+     "lon": 115.16,
+     "name": "Sample Sunset Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "restaurant",
+     "cuisine": "international",
+     "lat": -8.69,
+     "lon": 115.166,
+     "name": "Sample Beachfront Bistro (demo data)"
+    },
+    {
+     "category": "restaurant",
+     "cuisine": "japanese",
+     "lat": -8.688,
+     "lon": 115.169,
+     "name": "Sample Sushi Bar Seminyak (demo data)"
+    }
+   ]
+  },
+  "ID:legian": {
+   "attractions": [
+    {
+     "category": "natural=beach",
+     "lat": -8.7,
+     "lon": 115.165,
+     "name": "Sample Legian Beach Walk (demo data)",
+     "weather_exposure": "outdoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "fast_food",
+     "cuisine": "indonesian",
+     "lat": -8.701,
+     "lon": 115.166,
+     "name": "Sample Night Market Legian (demo data)"
+    }
+   ]
+  },
+  "ID:canggu": {
+   "attractions": [
+    {
+     "category": "leisure=beach_resort",
+     "lat": -8.6478,
+     "lon": 115.135,
+     "name": "Sample Surf Break Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=terrace",
+     "lat": -8.652,
+     "lon": 115.155,
+     "name": "Sample Rice Paddy Walk (demo data)",
+     "weather_exposure": "outdoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "cafe",
+     "cuisine": "international",
+     "lat": -8.647,
+     "lon": 115.139,
+     "name": "Sample Surfer Cafe (demo data)"
+    }
+   ]
+  },
+  "ID:bali": {
+   "attractions": [
+    {
+     "category": "tourism=attraction",
+     "lat": -8.5188,
+     "lon": 115.2588,
+     "name": "Sample Monkey Forest (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=terrace",
+     "lat": -8.4315,
+     "lon": 115.2778,
+     "name": "Sample Rice Terrace Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "historic=palace",
+     "lat": -8.4953,
+     "lon": 115.2653,
+     "name": "Sample Water Palace (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "tourism=museum",
+     "lat": -8.5069,
+     "lon": 115.2625,
+     "name": "Sample Art Museum Ubud (demo data)",
+     "weather_exposure": "indoor"
+    },
+    {
+     "category": "leisure=beach_resort",
+     "lat": -8.6905,
+     "lon": 115.165,
+     "name": "Sample Beach Club (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=beach",
+     "lat": -8.695,
+     "lon": 115.16,
+     "name": "Sample Sunset Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=beach",
+     "lat": -8.7,
+     "lon": 115.165,
+     "name": "Sample Legian Beach Walk (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "leisure=beach_resort",
+     "lat": -8.6478,
+     "lon": 115.135,
+     "name": "Sample Surf Break Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "natural=terrace",
+     "lat": -8.652,
+     "lon": 115.155,
+     "name": "Sample Rice Paddy Walk (demo data)",
+     "weather_exposure": "outdoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "restaurant",
+     "cuisine": "indonesian",
+     "lat": -8.507,
+     "lon": 115.263,
+     "name": "Sample Warung Local (demo data)"
+    },
+    {
+     "category": "cafe",
+     "cuisine": "vegetarian",
+     "lat": -8.509,
+     "lon": 115.261,
+     "name": "Sample Organic Cafe (demo data)"
+    },
+    {
+     "category": "restaurant",
+     "cuisine": "asian",
+     "lat": -8.51,
+     "lon": 115.264,
+     "name": "Sample Riverside Grill (demo data)"
+    },
+    {
+     "category": "restaurant",
+     "cuisine": "international",
+     "lat": -8.69,
+     "lon": 115.166,
+     "name": "Sample Beachfront Bistro (demo data)"
+    },
+    {
+     "category": "restaurant",
+     "cuisine": "japanese",
+     "lat": -8.688,
+     "lon": 115.169,
+     "name": "Sample Sushi Bar Seminyak (demo data)"
+    },
+    {
+     "category": "fast_food",
+     "cuisine": "indonesian",
+     "lat": -8.701,
+     "lon": 115.166,
+     "name": "Sample Night Market Legian (demo data)"
+    },
+    {
+     "category": "cafe",
+     "cuisine": "international",
+     "lat": -8.647,
+     "lon": 115.139,
+     "name": "Sample Surfer Cafe (demo data)"
+    }
+   ]
+  },
+  "SG:singapore": {
+   "attractions": [
+    {
+     "category": "leisure=garden",
+     "lat": 1.2816,
+     "lon": 103.8636,
+     "name": "Sample Bay Gardens (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "tourism=viewpoint",
+     "lat": 1.2838,
+     "lon": 103.8591,
+     "name": "Sample Marina Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "tourism=museum",
+     "lat": 1.2872,
+     "lon": 103.8517,
+     "name": "Sample Civic Museum (demo data)",
+     "weather_exposure": "indoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "restaurant",
+     "cuisine": "singaporean",
+     "lat": 1.3006,
+     "lon": 103.8452,
+     "name": "Sample Hawker Centre Stall (demo data)"
+    },
+    {
+     "category": "restaurant",
+     "cuisine": "chinese",
+     "lat": 1.2838,
+     "lon": 103.8607,
+     "name": "Sample Chinatown Kitchen (demo data)"
+    }
+   ]
+  },
+  "JP:tokyo": {
+   "attractions": [
+    {
+     "category": "historic=shrine",
+     "lat": 35.7148,
+     "lon": 139.7967,
+     "name": "Sample Old Shrine (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "tourism=viewpoint",
+     "lat": 35.6595,
+     "lon": 139.7005,
+     "name": "Sample Crossing Viewpoint (demo data)",
+     "weather_exposure": "outdoor"
+    },
+    {
+     "category": "tourism=museum",
+     "lat": 35.7188,
+     "lon": 139.7767,
+     "name": "Sample Modern Art Museum (demo data)",
+     "weather_exposure": "indoor"
+    }
+   ],
+   "restaurants": [
+    {
+     "category": "restaurant",
+     "cuisine": "japanese",
+     "lat": 35.6605,
+     "lon": 139.7016,
+     "name": "Sample Ramen Counter (demo data)"
+    },
+    {
+     "category": "cafe",
+     "cuisine": "japanese",
+     "lat": 35.7156,
+     "lon": 139.7745,
+     "name": "Sample Matcha Cafe (demo data)"
+    }
+   ]
+  }
+ }
+}

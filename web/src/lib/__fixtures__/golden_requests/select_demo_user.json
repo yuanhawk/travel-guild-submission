@@ -1,0 +1,8 @@
+{
+  "endpoint": "selectDemoUser",
+  "method": "POST",
+  "path": "/session",
+  "kind": "body",
+  "note": "api.ts selectDemoUser(user_id) POSTs {user_id} to the SAME /session route as listDemoUsers — presence of user_id switches the handler's branch.",
+  "body": { "user_id": "demo-lena" }
+}

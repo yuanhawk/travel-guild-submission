@@ -1,0 +1,8 @@
+{
+  "endpoint": "listMyTrips",
+  "method": "GET",
+  "path": "/trips",
+  "kind": "query",
+  "note": "Query-param endpoint — has NO request body. Required gate: user_id.",
+  "query": { "user_id": "demo-lena" }
+}

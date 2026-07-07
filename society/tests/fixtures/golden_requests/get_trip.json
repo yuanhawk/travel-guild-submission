@@ -1,0 +1,10 @@
+{
+  "endpoint": "getTrip",
+  "method": "GET",
+  "path": "/trips/{idempotency_key}",
+  "kind": "path_query",
+  "note": "Logged-in variant — api.ts getTrip() always sends owner_token as a query param, and ALSO sends session_token when logged in (authFields().session_token is truthy). Both tokens present here to exercise the richer branch.",
+  "path_template": "/trips/{idempotency_key}",
+  "path_params": { "idempotency_key": "gr-trip-key" },
+  "query": { "owner_token": "gr-owner-token", "session_token": "gr-session-token" }
+}

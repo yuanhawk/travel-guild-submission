@@ -1,0 +1,13 @@
+{
+  "endpoint": "cancelTrip",
+  "method": "POST",
+  "path": "/cancel",
+  "kind": "body",
+  "note": "Void a booked trip + refund the SIMULATED wallet. Required gate: idempotency_key. authFields() spread adds session_token+owner_token.",
+  "body": {
+    "idempotency_key": "gr-cancel-key",
+    "user_id": "demo-lena",
+    "session_token": "gr-session-token",
+    "owner_token": "gr-owner-token"
+  }
+}

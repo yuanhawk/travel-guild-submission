@@ -1,0 +1,13 @@
+{
+  "endpoint": "confirmPlan",
+  "method": "POST",
+  "path": "/confirm",
+  "kind": "body",
+  "note": "The one human consent. Required gate: idempotency_key. authFields() spread adds session_token+owner_token.",
+  "body": {
+    "idempotency_key": "gr-confirm-key",
+    "user_id": "demo-lena",
+    "session_token": "gr-session-token",
+    "owner_token": "gr-owner-token"
+  }
+}

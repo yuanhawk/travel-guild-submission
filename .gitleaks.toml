@@ -1,0 +1,28 @@
+# gitleaks config — extend the default ruleset, allowlist documented examples.
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+False positives, not real secrets:
+1. ucp-merchant/AUTH-SPEC.md — UCP spec REFERENCE doc with illustrative EXAMPLE
+   tokens/keys (JWT/JWS/SD-JWT/JWK coords).
+2. "fresh-consent-*" — DUMMY test consent-token fixtures in society/tests/test_fraud_agent.py
+   (e.g. "fresh-consent-2026-06-16"), used to test that fresh consent overrides a
+   blocked counterparty. High-entropy but a self-describing test string, not a credential.
+3. society/tests/test_ucp_signing.py — EPHEMERAL EC P-256 key material, a unit-test fixture
+   for the RFC 9421 signer, never a real/deployed secret. The current file
+   generates its key at runtime; this path allowlist also covers an earlier commit
+   that briefly pinned a throwaway test scalar.
+Real secrets live only in .env files (see .env.example), which are gitignored.
+"""
+paths = [
+  '''ucp-merchant/AUTH-SPEC\.md''',
+  '''society/tests/test_ucp_signing\.py''',
+]
+regexes = [
+  '''fresh-consent-[A-Za-z0-9-]+''',
+  # UCP prepaid-checkout idempotency keys in golden-envelope fixtures and the Go
+  # checkout unit-test — self-describing test strings, not real credentials.
+  '''trip-[a-zA-Z0-9_-]{6,}''',
+]

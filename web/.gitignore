@@ -1,0 +1,20 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+coverage/
+# saved Cloudflare Access session for the live staging suite (a secret — never commit)
+e2e/.auth/
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+
+# design iteration artifacts (not for judging)
+mockups/
+design/
+
+# build/dev artifacts
+*.log
+*.timestamp-*.mjs

@@ -1,0 +1,39 @@
+# gitleaks config — extend the default ruleset, allowlist documented examples.
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+False positives, not real secrets:
+1. Any fixture/stub keys used in vitest unit tests (e.g. deterministic test
+   tokens) — these are self-describing test strings, never deployed credentials.
+Real secrets: the Google Places API key and any other live keys live ONLY in
+.env files (gitignored) and are NEVER committed or bundled into src/.
+The FE bundle is a PUBLIC artifact — gitleaks is the last line of defence.
+
+A repo-wide secret scan surfaced generic-api-key findings on deterministic
+golden-fixture IDs of the form trip-<16 hex> (the SAME value appears as both
+idempotency_key and wallet_session_id for a given trip -- a derived hash,
+provably not a live credential). Verified individually + swept the whole repo
+for any real credential shape (Google AIza.../AWS/GitHub tokens/JWT/
+private-key/connection-string) -- none found.
+
+A path+regex pair with condition = "AND" (suppress only when BOTH the
+trip-<hex> shape AND a specific fixture path match) was tried and then
+EMPIRICALLY DISPROVEN before shipping: on gitleaks 8.21.2, the global
+singular [allowlist]'s `condition` field is not honored the way the per-rule
+[[rules.allowlists]] schema honors it -- a `paths` entry alone suppressed
+EVERY finding under that path regardless of whether the regex matched
+(proven with a regex built to never match anything and it still suppressed a
+planted fake Google key in the same directory). Shipping that would have
+been an overly broad blanket-path suppression.
+
+Landed instead on regexes-only (no paths, no condition) -- verified here: a
+planted fake Google API key in the SAME fixture file as a real trip-<hex>
+value is still correctly caught (only the trip-<hex> finding is suppressed).
+Safe repo-wide because trip-<16 hex> cannot collide with any real credential
+shape (Google AIza[35], AWS AKIA[16], GitHub ghp_[36], JWTs, PEM headers all
+look structurally different) -- so this is narrow by construction, not by
+path scoping.
+"""
+regexes = ['''trip-[0-9a-f]{16}''']

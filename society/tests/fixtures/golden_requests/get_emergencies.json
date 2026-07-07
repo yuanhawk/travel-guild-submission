@@ -1,0 +1,8 @@
+{
+  "endpoint": "getEmergencies",
+  "method": "GET",
+  "path": "/emergencies",
+  "kind": "query",
+  "note": "Query-param endpoint — has NO request body and NO query params at all (the global active-emergency watchlist, TTL-cached).",
+  "query": {}
+}

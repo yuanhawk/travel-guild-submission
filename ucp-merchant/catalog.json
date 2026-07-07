@@ -1,0 +1,167 @@
+[
+ {
+  "id": "bali-alaya-ubud",
+  "title": "Sample Resort Ubud (demo data)",
+  "city": "bali",
+  "country": "Indonesia",
+  "star_rating": 5.0,
+  "review_score": 4.6,
+  "metro_access": false,
+  "transport_score": 0.7,
+  "price_cents_per_night": 16500,
+  "amenities": [
+   "pool",
+   "spa",
+   "breakfast",
+   "wifi"
+  ],
+  "max_occupancy": 4
+ },
+ {
+  "id": "bali-alila-seminyak",
+  "title": "Sample Beach Villa Seminyak (demo data)",
+  "city": "bali",
+  "country": "Indonesia",
+  "star_rating": 5.0,
+  "review_score": 4.7,
+  "metro_access": false,
+  "transport_score": 0.6,
+  "price_cents_per_night": 39800,
+  "amenities": [
+   "pool",
+   "beach_access",
+   "breakfast",
+   "wifi"
+  ],
+  "max_occupancy": 4
+ },
+ {
+  "id": "bali-legian-beach",
+  "title": "Sample Legian Beachfront Inn (demo data)",
+  "city": "bali",
+  "country": "Indonesia",
+  "star_rating": 3.0,
+  "review_score": 4.1,
+  "metro_access": false,
+  "transport_score": 0.5,
+  "price_cents_per_night": 12400,
+  "amenities": [
+   "breakfast",
+   "wifi"
+  ],
+  "max_occupancy": 3
+ },
+ {
+  "id": "bali-ubud-garden",
+  "title": "Sample Ubud Garden Homestay (demo data)",
+  "city": "bali",
+  "country": "Indonesia",
+  "star_rating": 2.0,
+  "review_score": 4.4,
+  "metro_access": false,
+  "transport_score": 0.4,
+  "price_cents_per_night": 4200,
+  "amenities": [
+   "breakfast",
+   "wifi"
+  ],
+  "max_occupancy": 6
+ },
+ {
+  "id": "bali-kuta-paradiso",
+  "title": "Sample Kuta Paradiso Inn (demo data)",
+  "city": "bali",
+  "country": "Indonesia",
+  "star_rating": 3.0,
+  "review_score": 4.2,
+  "metro_access": false,
+  "transport_score": 0.5,
+  "price_cents_per_night": 13000,
+  "amenities": [
+   "pool",
+   "breakfast",
+   "wifi"
+  ],
+  "max_occupancy": 4
+ },
+ {
+  "id": "sample-seminyak-suite",
+  "title": "Sample Seminyak Suite (demo data)",
+  "city": "seminyak",
+  "country": "Indonesia",
+  "star_rating": 4.0,
+  "review_score": 4.5,
+  "metro_access": false,
+  "transport_score": 0.6,
+  "price_cents_per_night": 15800,
+  "amenities": [
+   "pool",
+   "wifi"
+  ],
+  "max_occupancy": 3
+ },
+ {
+  "id": "sample-canggu-surf-lodge",
+  "title": "Sample Canggu Surf Lodge (demo data)",
+  "city": "canggu",
+  "country": "Indonesia",
+  "star_rating": 3.0,
+  "review_score": 4.3,
+  "metro_access": false,
+  "transport_score": 0.55,
+  "price_cents_per_night": 9800,
+  "amenities": [
+   "wifi",
+   "surf_storage"
+  ],
+  "max_occupancy": 4
+ },
+ {
+  "id": "sample-legian-inn",
+  "title": "Sample Legian Inn (demo data)",
+  "city": "legian",
+  "country": "Indonesia",
+  "star_rating": 3.0,
+  "review_score": 4.0,
+  "metro_access": false,
+  "transport_score": 0.5,
+  "price_cents_per_night": 8600,
+  "amenities": [
+   "breakfast",
+   "wifi"
+  ],
+  "max_occupancy": 4
+ },
+ {
+  "id": "sg-marina-sample",
+  "title": "Sample Marina Bay Stay (demo data)",
+  "city": "singapore",
+  "country": "Singapore",
+  "star_rating": 4.0,
+  "review_score": 4.5,
+  "metro_access": true,
+  "transport_score": 0.9,
+  "price_cents_per_night": 21000,
+  "amenities": [
+   "pool",
+   "wifi",
+   "breakfast"
+  ],
+  "max_occupancy": 3
+ },
+ {
+  "id": "tokyo-shibuya-sample",
+  "title": "Sample Shibuya Capsule Stay (demo data)",
+  "city": "tokyo",
+  "country": "Japan",
+  "star_rating": 3.0,
+  "review_score": 4.2,
+  "metro_access": true,
+  "transport_score": 0.95,
+  "price_cents_per_night": 8800,
+  "amenities": [
+   "wifi"
+  ],
+  "max_occupancy": 2
+ }
+]

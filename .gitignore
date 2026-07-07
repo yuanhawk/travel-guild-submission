@@ -1,0 +1,94 @@
+# ── Secrets — NEVER commit ───────────────────────────────────────────────
+.env
+*.env
+!.env.example
+*.key
+*.pem
+*.p12
+*.jwk
+ucp_signing_*.json
+*secret*
+*token*
+# NOTE: *token* above is meant to catch secret/credential token files, not
+# source code that happens to have "token" in its name — session_token.py is
+# the session-token module itself (code), not a stored secret value.
+!society/utils/session_token.py
+!society/tests/test_session_token.py
+# golden-request fixtures are audit-verified placeholder-only test data (gr-session-token
+# etc, no real secrets) -- get_telegram_link_token.json was silently dropped by *token*
+# above, breaking the 17-fixture regression lock in CI.
+!society/tests/fixtures/golden_requests/*.json
+!*.example
+
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# ── Go ───────────────────────────────────────────────────────────────────
+/ucp-merchant/bin/
+/ucp-merchant/ucp-merchant
+*.test
+*.out
+
+# ── Places photo/card disk cache (runtime, not source; swap to AliCloud OSS in prod) ──
+places_data/
+
+# ── Built binaries / scratch artifacts (never commit) ─────────────────────
+*-new
+
+# ── Data / runtime (proprietary — never commit) ──────────────────────────
+data/
+*.db
+*.sqlite
+dumps/
+snapshots/
+.seed.lock
+
+# ── Benchmark transcripts — the benchmark/ harness itself is not shipped in
+# this public showcase repo; these patterns just guard against ever
+# accidentally committing one if benchmark/ is added back locally.
+benchmark/
+*.raw.jsonl
+
+# ── Node / Playwright E2E — commit the specs+config+lockfile, NOT artifacts ──
+node_modules/
+society/e2e/test-results/
+society/e2e/playwright-report/
+society/e2e/blob-report/
+society/e2e/.cache/
+playwright/.cache/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/coverage/
+web/.wrangler/
+
+# ── OS / editor ───────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*~
+tmp/
+docs/RESTRUCTURE_PLAN.md
+docs/POST_SEEDING_RUNBOOK.md
+docs/TESTING.md
+docs/submission/
+society/telemetry.jsonl
+society/poi_supplement.json
+society/.seed_done.json
+society/.seed_quota.json
+society/.seed_report_state.json
+
+# Honest-coverage loop (runtime telemetry + generated backlog)
+society/.gap_demand_log.jsonl
+society/GAP-BACKLOG.md
+society/.hero_seed_done.json
+
+# runtime logs (never commit)
+*.log
+**/.*.log
+lodgingstore.db

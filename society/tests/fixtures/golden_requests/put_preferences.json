@@ -1,0 +1,16 @@
+{
+  "endpoint": "putPreferences",
+  "method": "PUT",
+  "path": "/preferences",
+  "kind": "body",
+  "note": "Update-only (no register). Required gate: user_id AND a session_token that verify_session() accepts for that user_id (issued by POST /session/login). This static fixture's session_token is a placeholder, NOT a live-issued token, so the backend contract test expects an honest 401 here (proves the field-presence gate passed and the token was actually checked) — see test_golden_request_contract.py's per-endpoint table.",
+  "body": {
+    "user_id": "demo-lena",
+    "display_name": "Lena",
+    "persona": "couple",
+    "nationality": "SG",
+    "home_currency": "SGD",
+    "prefs": { "pace": "relaxed" },
+    "session_token": "gr-session-token"
+  }
+}

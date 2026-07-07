@@ -1,0 +1,31 @@
+# Travel Guild engine — runtime dependencies (public showcase repo, trimmed)
+# Python 3.12+
+# Pin exact versions that were tested.
+
+# ASGI framework (server base + TestClient for in-process tests)
+starlette==1.3.1
+# HTTP server (for running the orchestration server as a real service)
+uvicorn==0.49.0
+# HTTP client (for the A2A client + optional real-HTTP integration test)
+httpx==0.28.1
+# httpx dependencies (pinned for reproducibility)
+anyio==4.13.0
+h11==0.16.0
+httpcore==1.0.9
+# test runner (`make test` / pytest)
+pytest==8.3.4
+# parallel test execution
+pytest-xdist==3.8.0
+rich==15.0.0
+# SSE streaming
+sse-starlette==3.4.4
+# RFC 9421 client-side request signing (NHI agent identity)
+cryptography==49.0.0
+
+# NOTE: this list is intentionally trimmed relative to the private engine's
+# requirements.txt. Dropped: google-auth/requests (only needed for the private
+# Gemini/Vertex offline seeding pipeline, which this repo does not ship —
+# utils/vertex_gemini.py lazy-imports google.* inside a try/except, so its mere
+# presence in the tree does not require these at import time) and
+# pykakasi/pythainlp/pypinyin (only used by the excluded reference/seeding/
+# romanization pipeline, not shipped here).

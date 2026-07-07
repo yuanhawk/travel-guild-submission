@@ -1,0 +1,14 @@
+# Local secret-scanning gate. Mirrors the CI `secrets` job (see
+# .github/workflows/ci.yml) so a leaked key (e.g. the Google Places API key)
+# is caught before a commit ever leaves this machine, not just after a push.
+#
+# Activate on a fresh clone:
+#   pip install pre-commit && pre-commit install
+#
+# Version pinned to match the gitleaks release CI already sha256-verifies
+# (v8.21.2) so local and CI scans stay in lockstep.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

@@ -1,0 +1,13 @@
+{
+  "endpoint": "aftercareCheck",
+  "method": "POST",
+  "path": "/aftercare/check",
+  "kind": "body",
+  "note": "Read-only proactive risk-monitoring check on a booked trip. Required gate: idempotency_key. authFields() spread adds session_token+owner_token (IDOR fix: threads the same two-tier ownership proof as /confirm /cancel /replan /refine, so the backend's post-VULN-AUTH-001 ownership gate can authorize a real owner instead of denying every logged-in/anon trip).",
+  "body": {
+    "idempotency_key": "gr-aftercare-key",
+    "user_id": "demo-lena",
+    "session_token": "gr-session-token",
+    "owner_token": "gr-owner-token"
+  }
+}
