@@ -1,7 +1,7 @@
 """
 allocator.py — Exact-optimal multiple-choice-knapsack allocator (Track-3 Travel Guild §2.1).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §2.1 (complexity-reduction),
+Design contract: the internal design spec §2.1 (complexity-reduction),
                  §3.1 (Planner authority), §10.11 (determinism/variance-0).
 
 ## Purpose
@@ -42,12 +42,12 @@ combination.
     The `bucket_cents` parameter is accepted for backward compatibility but is not
     used; the algorithm operates on exact cents with no discretization.
 
-## Quality score convention (M-Agentic-3 integration)
+## Quality score convention (LLM-ranking integration)
 
 The caller (Planner/orchestrator) pre-computes the `quality` field on each
 candidate before calling `allocate()`.  Two modes:
 
-  1. LLM-ranked candidates (M-Agentic-3 active):
+  1. LLM-ranked candidates (LLM ranking active):
      `quality = (n_candidates - 1 - rank_index) / (n_candidates - 1)` (SEV-3 fix),
      normalised to [0,1] per-leg so legs with more candidates do not dominate
      the global DP sum.  Top-ranked = 1.0, worst-ranked = 0.0.
@@ -353,13 +353,13 @@ def allocate(
 
 
 # ---------------------------------------------------------------------------
-# Quality score derivation helpers (M-Agentic-3 integration)
+# Quality score derivation helpers (LLM-ranking integration)
 # ---------------------------------------------------------------------------
 
 
 def quality_from_rank(rank_index: int, n_candidates: int) -> float:
     """
-    Derive a normalised quality score from M-Agentic-3 LLM rank position.
+    Derive a normalised quality score from LLM rank position.
 
     Returns a value in [0, 1]:
       - rank_index 0 (best rank) → 1.0
@@ -384,7 +384,7 @@ def quality_from_review_score(review_score: float) -> float:
     """
     Derive a quality score from the merchant review_score (deterministic fallback).
 
-    Used when M-Agentic-3 LLM ranking is not available.
+    Used when LLM ranking is not available.
     The review_score from catalog.go is already a good quality proxy (0-10 scale).
 
     Args:
@@ -402,7 +402,7 @@ def attach_quality_scores(
     """
     Attach `quality` scores to a list of (possibly LLM-ranked) candidates.
 
-    This is the single integration point between M-Agentic-3 ranking output
+    This is the single integration point between LLM ranking output
     and the DP allocator.
 
     Convention:

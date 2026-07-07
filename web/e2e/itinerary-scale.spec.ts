@@ -364,8 +364,7 @@ test.describe('touch interactions', () => {
   // dayBatchStartedForPlans's reset genuinely re-armed the position-keyed fetch
   // guard for the new `plans` identity and a fresh fetch actually fired — i.e.
   // this is the one test that would go red if that reset were removed/broken.
-  // (Confirmed by a manual revert-and-restore of that reset during authoring —
-  // see itinerary-scale.spec.ts commit note / task report.)
+  // (Confirmed by a manual revert-and-restore of that reset during authoring.)
   // ═══════════════════════════════════════════════════════════════════════════
 
   test('mobile long-press (real >=500ms hold) then drag-release on another day-tab completes a day swap: correct /replan swap_days fires, day content visibly swaps, and the newly-swapped-in day fetches ITS OWN photo (not stale)', async ({ page }) => {
@@ -660,8 +659,8 @@ test("a collapsed leg's thumbnail is fetched eagerly and shows the real photo, n
 // every other day's panel stayed `tab-hidden` (display:none, never unmounted)
 // and unreachable, because the tab hover never triggered the switch.
 //
-// Fix mirrors the identical gate already fixed in onDragOverItem (commit
-// 9c4c5e8): also accept `e.dataTransfer?.effectAllowed === 'copy'`, which BOTH
+// Fix mirrors the identical gate already fixed in onDragOverItem: also
+// accept `e.dataTransfer?.effectAllowed === 'copy'`, which BOTH
 // suggestion sources set at dragstart (RightRail's onSugDragStart included),
 // regardless of which component started the drag.
 //

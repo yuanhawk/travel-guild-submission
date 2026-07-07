@@ -27,7 +27,7 @@ export interface ProgressState {
   finished: boolean;          // negotiate_finished seen (board may unmount)
 }
 
-// Canonical roster — mirrors orchestrator.py emit names + kanban.html:846-859.
+// Canonical roster — mirrors orchestrator.py's emit names.
 export const AGENT_ROSTER: { name: string; layer: AgentLayer }[] = [
   { name: 'Destination',   layer: 'plan'  },
   { name: 'Risk',          layer: 'gate'  },
@@ -52,7 +52,7 @@ export function hasFlag(text?: string): boolean {
 
 export function initProgress(): ProgressState {
   return {
-    phase: 'Waking the society of agents…',
+    phase: 'Waking the Travel Guild agents…',
     rows: AGENT_ROSTER.map((a) => ({
       name: a.name, layer: a.layer, status: 'pending',
       verdict: '', elapsedMs: null, flagged: false, startedMs: null,

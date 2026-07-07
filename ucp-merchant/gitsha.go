@@ -1,5 +1,5 @@
 // gitsha.go — resolve the running build's git SHA for /health, mirroring
-// society/orchestration/server.py::_resolve_git_sha (merged PR #41) so both
+// society/orchestration/server.py::_resolve_git_sha so both
 // services report build provenance the same way.
 package main
 
@@ -23,8 +23,8 @@ var gitSHA = "unknown"
 // there is the ucp-merchant/ subdirectory only, which has no .git dir to
 // stamp from anyway) and the distroless runtime has no git binary and no
 // .git dir at all, so on a real deploy this predictably falls through to the
-// GIT_SHA env var — the SAME env var name ops/deploy-staging.sh stamps for
-// the Python backend's systemd unit, so whatever starts this container
+// GIT_SHA env var — the SAME env var name a coordinated deploy would stamp for
+// the Python backend's process, so whatever starts this container
 // should set GIT_SHA too (see Dockerfile's GIT_SHA build ARG/ENV plumbing).
 //
 // Falls back to "unknown" rather than ever panicking — a stale/missing SHA

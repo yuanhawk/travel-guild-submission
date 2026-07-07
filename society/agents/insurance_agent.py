@@ -1,7 +1,7 @@
 """
 insurance_agent.py — Insurance / residual-risk coverage specialist (Travel Guild, L2).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §17.1 (Insurance specialist),
+Design contract: the internal design spec §17.1 (Insurance specialist),
 §17.3 (DC0 demo-contrast), §16.6.1 (insurance EXCLUSIONS sharpen L2), §19 (build
 plan: "Insurance (DC0, L2) — money-path but NO-LLM-NUMBERS clamped"), and the
 "Insurance" entry of agent-blueprints-raw.json.

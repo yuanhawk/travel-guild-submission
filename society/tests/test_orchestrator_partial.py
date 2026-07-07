@@ -4,7 +4,7 @@ test_orchestrator_partial.py — P0 partial-booking fix unit tests.
 CI-safe: all merchant HTTP calls intercepted with mock transport.
          Uses Starlette in-process ASGI TestClient throughout.
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §4.2, §4.3, §4.6 (all-or-none rule).
+Design contract: the internal design spec §4.2, §4.3, §4.6 (all-or-none rule).
 
 P0 Bug:
     The orchestrator previously computed fitted_legs (only legs WITH proposals) and

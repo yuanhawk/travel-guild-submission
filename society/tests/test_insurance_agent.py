@@ -4,7 +4,7 @@ test_insurance_agent.py — Unit + invariant tests for the Insurance specialist 
 CI-safe: no LLM, no network, no DashScope. Uses the deterministic clause-matcher
 directly and the in-process Starlette ASGI TestClient for the A2A surface.
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §17.1, §17.3 (DC0), §19; the
+Design contract: the internal design spec §17.1, §17.3 (DC0), §19; the
 "Insurance" blueprint test_plan (unit_tests + invariants + closed_set_fallback).
 
 Coverage map (blueprint test_plan):

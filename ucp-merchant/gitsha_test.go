@@ -5,7 +5,7 @@ package main
 // Regression coverage for the same deploy-staleness class of bug the Python
 // backend's git_sha field guards against (see
 // society/tests/test_health_git_sha.py and society/orchestration/server.py
-// ::_resolve_git_sha, merged PR #41): a stale running process can silently be
+// ::_resolve_git_sha): a stale running process can silently be
 // missing a merged fix with no way to tell from the outside. /health now
 // exposes "git_sha" (resolved once at startup — see gitsha.go::resolveGitSHA)
 // so a deploy script can diff it against the deployed commit.
@@ -59,8 +59,8 @@ func TestHealthReportsGitShaField(t *testing.T) {
 // `git rev-parse HEAD` fails (e.g. no .git dir on the deploy target — the
 // distroless runtime image never has one), resolveGitSHA must fall back to
 // the GIT_SHA env var. This is exactly what a coordinated deploy relies on
-// (see ucp-merchant/Dockerfile's GIT_SHA ARG/ENV + ops/deploy-staging.sh's
-// note on stamping the same env var name for the Python sibling).
+// (see ucp-merchant/Dockerfile's GIT_SHA ARG/ENV -- a coordinated deploy
+// stamps the same env var name for the Python sibling).
 func TestResolveGitSHAFallsBackToEnvVarWhenGitUnavailable(t *testing.T) {
 	orig := gitRevParseHEAD
 	defer func() { gitRevParseHEAD = orig }()

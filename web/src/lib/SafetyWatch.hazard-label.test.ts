@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 //
-// Adversarial review (2026-07-06): the Global Safety
-// Watch overlay rendered EmergencyCountry.hazard verbatim — a raw served
+// The Global Safety Watch overlay rendered EmergencyCountry.hazard verbatim — a raw served
 // snake_case key (e.g. "tropical_cyclone", from emergency_feed.py's
 // _GDACS_HAZARD) — with no text-transform/humanizer, unlike the per-leg
 // advisory chip (RightRail.svelte) which already routes its category through

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +58,23 @@ _DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 _TRANSLATE_MODEL = os.environ.get("SOCIETY_TRANSLATE_MODEL", "qwen-turbo")
 
 
+# prefs.lang is caller-controlled and flows into the translation LLM's target-language
+# slot (translate_alert below). Validate its shape before use so it can only ever be a
+# short language(-region) tag, never arbitrary free text.
+_BCP47_SHAPE_RE = re.compile(r"^[a-z]{2,3}(-[a-z]{2,4})?$")
+
+
 def resolve_lang(user: dict | None) -> str:
     """prefs.lang override > NATIONALITY_LANG[nationality] > 'en'. Pure."""
     if not isinstance(user, dict):
         return "en"
     prefs = user.get("prefs") or {}
-    # SECURITY VULN-001 PROMPT INJECTION (CVSS 7.1 HIGH): prefs.lang is caller-controlled
-    # and flows into the LLM system prompt without sanitisation. Combined with VULN-003
-    # (unauthenticated PUT /preferences), this enables unauthenticated prompt injection.
-    # TODO: allowlist prefs.lang against BCP-47 language codes before use.
-    # Requires: audit web/'s lang values to ensure allowlist covers all valid inputs.
     if isinstance(prefs, dict) and prefs.get("lang"):
-        return str(prefs["lang"]).strip().lower() or "en"
+        candidate = str(prefs["lang"]).strip().lower()
+        if _BCP47_SHAPE_RE.match(candidate):
+            return candidate
+        # Malformed/oversized value -- fall through to the nationality-based default
+        # rather than pass it on.
     nat = (user.get("nationality") or "").strip().upper()
     return NATIONALITY_LANG.get(nat, "en")
 

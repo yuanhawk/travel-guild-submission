@@ -5,7 +5,7 @@ package main
 // Adds a sim control that marks hotels unavailable (sold-out) so the society
 // can demonstrate reactive disruption-recovery.
 //
-// Design: §12.1 §12.8 §12.9 (AGENT-SOCIETY-A2A-DESIGN.md).
+// Design: §12.1 §12.8 §12.9 (the internal design spec).
 //
 // TWO distinct exogenous fault classes (both visible-as-data, never
 // LLM-invented; the operator triggers, never touches recovery — §10.5):

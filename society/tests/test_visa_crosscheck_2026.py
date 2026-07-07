@@ -1,6 +1,6 @@
 """
 test_visa_crosscheck_2026.py — locks in the 2026 visa cross-check corrections
-(workflow w2q1642x2, adversarially verified). Each was the "Vietnam pattern": a
+(adversarially verified). Each was the "Vietnam pattern": a
 missing visa-free row wrongly charging an exempt traveller, or a stale fee.
 Deterministic; no LLM/network.
 """

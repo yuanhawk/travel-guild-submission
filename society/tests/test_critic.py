@@ -4,7 +4,7 @@ test_critic.py — Unit tests for M3a Critic/Verifier agent (Travel Guild).
 CI-safe: all merchant HTTP calls intercepted with mock transport (lookup_catalog).
          Uses Starlette in-process ASGI TestClient throughout.
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.6, §2, §4.1–4.3, §4.6.
+Design contract: the internal design spec §3.6, §2, §4.1–4.3, §4.6.
 
 Coverage:
   1. test_critic_verified_happy_path       — good package → "verified"

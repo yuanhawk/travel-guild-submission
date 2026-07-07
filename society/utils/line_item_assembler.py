@@ -1,7 +1,7 @@
 """
 line_item_assembler.py — PHASE-0 Budget line-item ASSEMBLER (§19.5, §16.3).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §19.5 ("Line-item ASSEMBLER owner
+Design contract: the internal design spec §19.5 ("Line-item ASSEMBLER owner
 = Budget. When multiple agents emit fee line items (Compliance visa, Health
 vaccine, Insurance premium) into ONE checkout/mandate, Budget deterministically
 assembles + orders the final line_items (idempotent, keyed) before

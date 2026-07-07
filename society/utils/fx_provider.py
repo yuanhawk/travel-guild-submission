@@ -1,7 +1,7 @@
 """
 fx_provider.py — PHASE-0 FX PROVIDER SEAM (§18 provider layer, §19.5 audit).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §18 (the sourcing substrate —
+Design contract: the internal design spec §18 (the sourcing substrate —
 reasoning ⊥ sourcing; LayeredProvider Tier-1 cache → Tier-2 live → Tier-3
 exhausted; provenance; never-hallucinate), §19.1 (FX/currency normalization has
 NO owner — GAP), §19.5 ("FX-owner = §18 provider seam confirmed: provider emits

@@ -30,7 +30,7 @@ Tests (CI-safe, mock merchant, no LLM, no network):
   (f) test_cascade_hotel_then_flight_order_matters
         The 2nd fault hits the NEW (already-recovered) state, not the original.
 
-Design: §12.1 §12.8 §12.9 (AGENT-SOCIETY-A2A-DESIGN.md).
+Design: §12.1 §12.8 §12.9 (the internal design spec).
 """
 
 from __future__ import annotations

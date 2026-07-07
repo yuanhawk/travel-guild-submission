@@ -8,7 +8,7 @@ terminal transcript — NOT raw logs. It tells the submission story:
     "Safe autonomous agentic commerce — proven on travel.
      Structure is variance control, with checks & balances."
 
-Beats (matches AGENT-SOCIETY-A2A-DESIGN.md §14.5):
+Beats (matches the internal design spec §14.5):
     ①  INTENT          one Telegram sentence in
     ②  NEGOTIATION     society proposes → real Go 403 budget veto → re-plan →
                        Critic re-verifies prices → ONE consent → ap2_mandate →

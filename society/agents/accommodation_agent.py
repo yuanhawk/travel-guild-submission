@@ -1,7 +1,7 @@
 """
 accommodation_agent.py — Accommodation A2A agent (Travel Guild M2/M3).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.4, §4.6, §10.11.
+Design contract: the internal design spec §3.4, §4.6, §10.11.
 
 Agent Card skill: ``accommodation.propose``
 

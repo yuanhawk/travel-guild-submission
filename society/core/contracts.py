@@ -1,7 +1,7 @@
 """
 contracts.py — PHASE-0 SHARED CONTRACTS for the Travel Guild (Track-3 A2A).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §18 (sourcing substrate;
+Design contract: the internal design spec §18 (sourcing substrate;
 reasoning ⊥ sourcing; LayeredProvider Tier1→Tier2→Tier3; provenance;
 never-hallucinate), §19.1 (the Phase-0 shared-contract gap list), §19.5
 (audit refinements).

@@ -1,12 +1,9 @@
 # intent_phrasings.jsonl — regression corpus for parse_intent (LLM-OFF).
 #
-# PROCESS NOTE (2026-07-03 postmortem, #192/#193): every parser bugfix MUST add
-# a corpus row here, not just an instance test in test_intent_parser.py — the
-# corpus is the systematic regression net; an instance test alone lets this
-# net silently drift out of use. #192 ("with my wife and 2 kids" undercounting
-# adults) and #193 ("April 10 to April 15" date-range duration parse failure)
-# both landed as fixes with ZERO corpus rows added, despite this file existing
-# precisely to catch this class of bug. Do not repeat that mistake.
+# CONVENTION: every parser bugfix should add a corpus row here, not just an
+# instance test in test_intent_parser.py — the corpus is the systematic
+# regression net; an instance test alone lets a fixed bug class silently
+# regress unnoticed.
 #
 # One JSON object per line. Fields:
 #   id       : unique kebab-case identifier
@@ -27,8 +24,8 @@
 #                checkin_year  : YYYY                         (resolve)
 #                checkin_month : MM                           (resolve)
 #                budget_min_cents: N                          (resolve)
-#                adults        : N          (resolve; #202, postmortem #192)
-#                nights        : N          (resolve; #202, postmortem #193)
+#                adults        : N          (resolve)
+#                nights        : N          (resolve)
 #                slot          : date|budget|destination|...  (clarify)
 #                filler_tokens : [...]  (no_filler_in_decline)
 #              }
@@ -51,24 +48,24 @@
 {"id":"breakage-05","category":"date_inquiry","text":"suggest a good date for visiting Bangkok, 7 nights, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"date"},"notes":"RC-5b: date-inquiry phrase → CLARIFY(DATE); no explicit date in text so gate fires"}
 
 # ============================================================
-# FABLE REVIEW BATCH B — 4 concrete reproduced mis-parses (must-pass)
+# CORPUS BATCH B — 4 concrete reproduced mis-parses (must-pass)
 # ============================================================
 
-{"id":"fableB-01","category":"destination_country","text":"a week in Jamaica, $3000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["kingston"]},"notes":"BUG 1 (most severe — silent wrong-country resolve): catalog city 'jamaica' (Queens, NY) coincidentally shares its name with the country Jamaica (Caribbean nation, gateway Kingston). Previously _scan_city_sequence found the Queens match first so the country-fallback path never fired, silently resolving to Queens/US. Must resolve to Kingston, dest_country JM."}
+{"id":"corpusB-01","category":"destination_country","text":"a week in Jamaica, $3000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["kingston"]},"notes":"BUG 1 (most severe — silent wrong-country resolve): catalog city 'jamaica' (Queens, NY) coincidentally shares its name with the country Jamaica (Caribbean nation, gateway Kingston). Previously _scan_city_sequence found the Queens match first so the country-fallback path never fired, silently resolving to Queens/US. Must resolve to Kingston, dest_country JM."}
 
-{"id":"fableB-02","category":"destination_country","text":"5 nights in Jamaica, USA, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["jamaica"]},"notes":"BUG 1 companion: a genuine US-disambiguated mention of 'Jamaica' must still resolve to the catalog city (Queens, NY), not be forced to the country gateway — the collision fix only fires when there is NO disambiguating cue."}
+{"id":"corpusB-02","category":"destination_country","text":"5 nights in Jamaica, USA, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["jamaica"]},"notes":"BUG 1 companion: a genuine US-disambiguated mention of 'Jamaica' must still resolve to the catalog city (Queens, NY), not be forced to the country gateway — the collision fix only fires when there is NO disambiguating cue."}
 
-{"id":"fableB-03","category":"unsupported","text":"I want a quiet week of reading, somewhere warm, $2000, 7 nights","context":{"today":"2026-07-03"},"expect":{"outcome":"clarify","slot":"destination"},"notes":"BUG 2: the bare gerund 'reading' (no destination cue) previously silently resolved to Reading, UK. 'reading' now requires a destination cue like the other ambiguous common-word cities (nice/bath/mobile) → honest CLARIFY(DESTINATION), not a silent mis-resolve."}
+{"id":"corpusB-03","category":"unsupported","text":"I want a quiet week of reading, somewhere warm, $2000, 7 nights","context":{"today":"2026-07-03"},"expect":{"outcome":"clarify","slot":"destination"},"notes":"BUG 2: the bare gerund 'reading' (no destination cue) previously silently resolved to Reading, UK. 'reading' now requires a destination cue like the other ambiguous common-word cities (nice/bath/mobile) → honest CLARIFY(DESTINATION), not a silent mis-resolve."}
 
-{"id":"fableB-04","category":"destination_city","text":"5 nights in Reading, England, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["reading"]},"notes":"BUG 2 companion: a genuinely-intended Reading trip still resolves correctly once a destination cue ('in') is present — the ambiguous-word fix does not break real Reading requests."}
+{"id":"corpusB-04","category":"destination_city","text":"5 nights in Reading, England, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["reading"]},"notes":"BUG 2 companion: a genuinely-intended Reading trip still resolves correctly once a destination cue ('in') is present — the ambiguous-word fix does not break real Reading requests."}
 
-{"id":"fableB-05","category":"destination_city","text":"5 nights in Ho Chi Minh City, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["ho chi minh city"]},"notes":"BUG 3: _scan_unknown_place's place-token regex caps at 2 ASCII-capitalised words, so it previously mangled this to 'Ho Chi' and falsely declined a destination _scan_city_sequence had already resolved correctly. Fixed by yielding to already-resolved spans."}
+{"id":"corpusB-05","category":"destination_city","text":"5 nights in Ho Chi Minh City, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["ho chi minh city"]},"notes":"BUG 3: _scan_unknown_place's place-token regex caps at 2 ASCII-capitalised words, so it previously mangled this to 'Ho Chi' and falsely declined a destination _scan_city_sequence had already resolved correctly. Fixed by yielding to already-resolved spans."}
 
-{"id":"fableB-06","category":"destination_city","text":"5 nights in Malé, beach, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["malé"]},"notes":"BUG 3: non-ASCII city name ('é') previously mangled to 'Mal' by the same 2-ASCII-word regex and falsely declined despite being a real catalog city."}
+{"id":"corpusB-06","category":"destination_city","text":"5 nights in Malé, beach, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["malé"]},"notes":"BUG 3: non-ASCII city name ('é') previously mangled to 'Mal' by the same 2-ASCII-word regex and falsely declined despite being a real catalog city."}
 
-{"id":"fableB-07","category":"destination_city","text":"5 nights in Saigon, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["ho chi minh city"]},"notes":"Alias-table gap found alongside BUG 3: 'Saigon' (the common colloquial/historical name) now maps to the Ho Chi Minh City catalog entry."}
+{"id":"corpusB-07","category":"destination_city","text":"5 nights in Saigon, culture, $1500","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["ho chi minh city"]},"notes":"Alias-table gap found alongside BUG 3: 'Saigon' (the common colloquial/historical name) now maps to the Ho Chi Minh City catalog entry."}
 
-{"id":"fableB-08","category":"date_month","text":"trip to Nice in May, 5 nights, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["nice"],"checkin_year":2027,"checkin_month":5},"notes":"BUG 4 regression: bare month-name-only date (no day given), today is AFTER May so the year-less date must roll forward to next year. Goes through the SAME _scan_start_date_raw/_maybe_roll mechanism as day-level dates (merged fix/honesty-gaps-batch-A) — already correct pre-fix; this row locks in the regression."}
+{"id":"corpusB-08","category":"date_month","text":"trip to Nice in May, 5 nights, $2000","context":{"today":"2026-07-03"},"expect":{"outcome":"resolve","cities":["nice"],"checkin_year":2027,"checkin_month":5},"notes":"BUG 4 regression: bare month-name-only date (no day given), today is AFTER May so the year-less date must roll forward to next year. Goes through the SAME _scan_start_date_raw/_maybe_roll mechanism as day-level dates (merged fix/honesty-gaps-batch-A) — already correct pre-fix; this row locks in the regression."}
 
 # ============================================================
 # destination_city
@@ -243,7 +240,7 @@
 {"id":"unsup-03","category":"unsupported","text":"I want to go somewhere nice, $2000, 7 nights","context":{"today":"2026-10-01"},"expect":{"outcome":"clarify","slot":"destination"},"notes":"no recognisable destination → CLARIFY(DESTINATION)"}
 
 # ============================================================
-# party_composition (#202 — postmortem for #192, "with my wife and 2 kids")
+# party_composition ("with my wife and 2 kids")
 # ============================================================
 
 {"id":"party-01","category":"party_composition","text":"5 nights in Osaka with my wife and 2 kids, $4000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["osaka"],"adults":2},"notes":"#192 EXACT live-test phrase: naming a spouse (no numeric token) infers speaker+wife=2 adults via the companion-word check in _scan_adults_raw; kids are handled separately (disclosure only, never priced as adults)"}
@@ -271,7 +268,7 @@
 {"id":"party-12","category":"party_composition","text":"single traveler, 5 nights in Tokyo, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["tokyo"],"adults":1},"notes":"'single traveler' has no recognised explicit-count keyword and resolves via the adults=1 default — verified this coincides with the honestly-correct answer, so not an xfail even though the signal isn't 'explicit' internally"}
 
 # ============================================================
-# date_range (#202 — postmortem for #193, "April 10 to April 15")
+# date_range ("April 10 to April 15")
 # ============================================================
 
 {"id":"daterange-01","category":"date_range","text":"Osaka April 10 to April 15, $2000","context":{"today":"2026-10-01"},"expect":{"outcome":"resolve","cities":["osaka"],"nights":5},"notes":"#193 EXACT live-test phrase (city-qualified): explicit unambiguous date range with 'to' join word → _scan_date_range_nights derives 5 nights"}

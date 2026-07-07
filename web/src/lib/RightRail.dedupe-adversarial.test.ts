@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
-// Adversarial edge-case locks for the dedupedAdvisories fix (adversarial
-// hunt follow-up, 2026-07-06). Verified against the actual backend templates:
+// Adversarial edge-case locks for the dedupedAdvisories fix. Verified against
+// the actual backend templates:
 //  - ADV-1: risk_agent detail templates all embed {region}, so identical details
 //    only occur for SAME-region multi-leg trips — D2 then lifts the string once
 //    per leg; both lifted copies must be dropped, per-leg copies still render.

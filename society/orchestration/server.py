@@ -2491,10 +2491,11 @@ async def preferences(request: Request) -> JSONResponse:
         if not u:
             return JSONResponse({"error": "unknown_user"}, status_code=404)
         return JSONResponse(_profile_view(u))
-    # PUT — update an EXISTING user only (no register).
-    # SECURITY VULN-003 (CVSS 5.4 MEDIUM): PUT /preferences bypasses auth + rate-limit middleware
-    # (middleware only gates POST, not PUT/PATCH). prefs.lang is injectable (prompt injection chain).
-    # TODO: extend _TokenAuthMiddleware and _RateLimitMiddleware to cover PUT/PATCH.
+    # PUT — update an EXISTING user only (no register). Session-token ownership is
+    # enforced below (verify_session); prefs.lang is validated at the point it's
+    # consumed (aftercare_lang.resolve_lang's BCP-47 shape check). The rate-limit
+    # middleware only covers POST today, not PUT/PATCH -- lower-severity than an
+    # auth gap, tracked as a follow-up rather than blocking.
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001

@@ -1,7 +1,7 @@
 """
 peril_crosswalk.py — PHASE-0 Risk→Insurance peril crosswalk (§19.1, §19.5).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §19.1 ("Risk→Insurance peril
+Design contract: the internal design spec §19.1 ("Risk→Insurance peril
 crosswalk missing — GAP; DC0 depends on it: civil_unrest must flow
 Risk→Insurance. Lock ONE canonical peril enum; Risk owns the threat SIGNAL,
 Insurance maps it to COVERAGE."), §19.5 ("Risk→Insurance peril crosswalk is a

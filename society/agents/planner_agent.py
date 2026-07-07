@@ -1,7 +1,7 @@
 """
 planner_agent.py — Planner A2A agent (Travel Guild M2).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.1, §4.2 R0, §2.1 (DP allocator).
+Design contract: the internal design spec §3.1, §4.2 R0, §2.1 (DP allocator).
 
 Agent Card skill: ``plan.decompose``
 

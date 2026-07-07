@@ -1,7 +1,7 @@
 """
 destination_agent.py — Destination / Local-expert A2A agent (M-Agentic-2).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.3 (Destination/Local-expert),
+Design contract: the internal design spec §3.3 (Destination/Local-expert),
 §10.11 (variance-clamped hybrid), §10.6 rows 9/10.
 
 Agent Card skill: ``destination.assess``
@@ -111,7 +111,7 @@ BALI_AREAS: frozenset[str] = frozenset({
 BALI_AREAS_ORDERED: tuple[str, ...] = tuple(sorted(BALI_AREAS))
 
 # Western Australia road-trip towns (seeded from the user's real 2022 WA loop;
-# see catalog.go provenance block + AGENT-SOCIETY-A2A-DESIGN.md §13). Each town
+# see catalog.go provenance block + the internal design spec §13). Each town
 # is a SINGLE-AREA city: town == city == area. Catalog ids follow
 # "<town>-<town>-<name>" so parse_area_from_hotel_id resolves the town as its
 # own area. Order mirrors the real Perth-to-Perth loop.

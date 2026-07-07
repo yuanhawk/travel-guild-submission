@@ -1,7 +1,7 @@
 """
 day_planner_agent.py — Per-leg day-by-day activity & meal planner (Travel Guild, build #30).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.x (activity planning) + the
+Design contract: the internal design spec §3.x (activity planning) + the
 §AGENT-EXTENSION PATTERN at the bottom of society/insurance_agent.py.
 
 Agent Card skill: ``activity.plan``

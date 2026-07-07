@@ -330,7 +330,7 @@ func toolSchemas() []map[string]any {
 			"inputSchema": obj(map[string]any{})},
 		// N1 fault control — flip a counterparty (carrier/OTA/lodging) insolvent.
 		{"name": "sim_set_counterparty",
-			"description": "World Simulator (N1): mark a counterparty (counterparty_id == catalog_id, e.g. a carrier or hotel id) solvent (true) or INSOLVENT (false). An insolvent counterparty's bookings go VOID: complete_checkout rejects any session referencing it (status:void, reason:counterparty_insolvent) — no counterparty to rebook against. Distinct from sim_set_availability (sold-out, substitutable) and sim_set_transfer (flight cancel, re-routable). The fault the society Fraud gate pre-empts. Demo/test only.",
+			"description": "World Simulator (N1): mark a counterparty (counterparty_id == catalog_id, e.g. a carrier or hotel id) solvent (true) or INSOLVENT (false). An insolvent counterparty's bookings go VOID: complete_checkout rejects any session referencing it (status:void, reason:counterparty_insolvent) — no counterparty to rebook against. Distinct from sim_set_availability (sold-out, substitutable) and sim_set_transfer (flight cancel, re-routable). The fault the Fraud agent pre-empts. Demo/test only.",
 			"inputSchema": obj(map[string]any{
 				"counterparty_id": str,
 				"solvent":         boolt,

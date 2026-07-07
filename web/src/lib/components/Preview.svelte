@@ -8,7 +8,7 @@
   import PlacePhotos from './PlacePhotos.svelte';
 
   // Draft 2 of the trip-summary/save-to-phone redesign, reconciled and reviewed.
-  // Source of truth for markup/CSS: mockups/trip-summary-draft2.html — hero band
+  // Source of truth for markup/CSS: an internal design draft — hero band
   // header, top-aligned (not sticky) accent budget card on desktop, left-edge
   // timeline day styling.
   //
@@ -68,7 +68,7 @@
     return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
   }
 
-  // Leg-hero band source (mockups/image-placement-draft1.html Item 1, "Leg-hero
+  // Leg-hero band source (an internal design draft Item 1, "Leg-hero
   // source + fetch" decision): the leg's MARQUEE activity — the first activity-kind
   // item (never a meal) across that leg's days in mealAnchoredTimeline order — so the
   // photo is a real place already in the itinerary, not an unrelated stock shot.
@@ -129,7 +129,7 @@
           {@const marquee = legMarqueeName(dp)}
           <article class="leg">
             <h2>{dp.city}{#if dp.country}<span class="cc">, {dp.country}</span>{/if}</h2>
-            <!-- Leg-hero band (mockups/image-placement-draft1.html Item 1): exactly one
+            <!-- Leg-hero band (an internal design draft Item 1): exactly one
                  per city leg, between <h2> and the first .day, itinerary column only.
                  Renders nothing if there's no marquee activity or the fetch comes back
                  empty/failed — PlacePhotos variant="banner" fails silent by design. -->
@@ -180,7 +180,7 @@
   {#if rows.length}
     <!-- Mobile-only slide-up breakdown sheet (Draft 3) — docked above the bar,
          not overlapping it; reuses ChatPane's .mob-sheet transform/transition/
-         radius pattern verbatim (mockups/trip-summary-draft3.html lines 144-154). -->
+         radius pattern verbatim (an internal design draft lines 144-154). -->
     <div class="budget-sheet" id="budgetSheet" class:bs-open={budgetExpanded} aria-hidden={!budgetExpanded}>
       <div class="bs-hdr">
         <span class="bs-ttl">Budget breakdown</span>
@@ -207,7 +207,7 @@
 </section>
 
 <style>
-  /* Palette pulled verbatim from mockups/trip-summary-draft2.html :root */
+  /* Palette pulled verbatim from an internal design draft :root */
   .preview {
     --accent: #d9774a; --accent-lt: #fff4ee; --accent-md: #f0c4a0;
     --bg: #faf6f0; --bg-card: #ffffff; --border: #ece2d5; --border-md: #ddd5c8;
@@ -297,7 +297,7 @@
   .p-footer { color: var(--text-dim); font-size: 11.5px; margin-top: 22px; padding: 14px 24px 0;
     border-top: 1px solid var(--border); }
 
-  /* Mobile budget bar/sheet (Draft 3, mockups/trip-summary-draft3.html lines
+  /* Mobile budget bar/sheet (Draft 3, an internal design draft lines
      117-154): hidden on desktop, shown under the same 768px breakpoint
      ChatPane's hideMobileBubble uses so the two transitions line up (no window
      where both the chat trigger AND this bar are visible/hidden inconsistently).

@@ -1,7 +1,7 @@
 """
 test_dp_allocator.py — Unit tests for the exact-optimal multiple-choice-knapsack allocator.
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §2.1 (complexity-reduction).
+Design contract: the internal design spec §2.1 (complexity-reduction).
 
 Coverage:
   1.  test_dp_equals_brute_force        — DP == brute-force exact optimum on >=300 random

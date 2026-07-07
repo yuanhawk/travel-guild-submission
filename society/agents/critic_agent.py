@@ -1,7 +1,7 @@
 """
 critic_agent.py — Critic/Verifier A2A agent (Travel Guild M3a).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.6, §2, §4.1–4.3, §4.6, §10.6/#4/#9.
+Design contract: the internal design spec §3.6, §2, §4.1–4.3, §4.6, §10.6/#4/#9.
 
 Agent Card skill: ``itinerary.verify``
 

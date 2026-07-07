@@ -1,7 +1,7 @@
 """
 transport_agent.py — Transport/Logistics feasibility specialist (Travel Guild M3b).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.x, §10.x.
+Design contract: the internal design spec §3.x, §10.x.
 
 Agent Card skill: ``transport.feasibility``
 
@@ -131,7 +131,7 @@ _INTER_CITY_FLIGHTS: dict[frozenset, int] = {
 # Western Australia inter-TOWN ROAD legs — SEEDED from the user's real 2022 WA
 # road trip (Perth-to-Perth loop, ~2816 km). PROVENANCE: structure + drive
 # distances are REAL (the user's trip); see ucp-merchant/catalog.go provenance
-# block + AGENT-SOCIETY-A2A-DESIGN.md §13.
+# block + the internal design spec §13.
 #
 # Unlike the inter-CITY pairs above (which are flights), WA towns are connected
 # by ROAD. We seed the real km between consecutive towns; minutes are advisory

@@ -1,26 +1,14 @@
 import { test, expect } from '@playwright/test';
 
 // honesty-render.spec.ts — consolidated interaction-level e2e gate for 6 honesty-render
-// tasks (#189, #190, #197, #205, #206, #203/#207) that each landed with a genuine
-// COMPONENT test (hand-mounted prop, e.g. RightRail.planning-note.test.ts) but ZERO
-// proof the served field actually reaches the DOM through the real negotiate/replan
-// app flow. Structural template: e2e/assumption-notes.spec.ts (#188/#196) — same
-// page.route mock-through-App.svelte pattern, same guest-session seeding, same
-// data-testid assertion style.
+// fields that each already had a genuine COMPONENT test (hand-mounted prop, e.g.
+// RightRail.planning-note.test.ts) but no proof the served field actually reaches
+// the DOM through the real negotiate/replan app flow. Structural template:
+// e2e/assumption-notes.spec.ts — same page.route mock-through-App.svelte pattern,
+// same guest-session seeding, same data-testid assertion style.
 //
-// ── Landing status at the time this spec was written (2026-07-03) ──────────────
-// #189 planning_note, #190 day_plans notes, #197 hop disambiguation: MERGED to main
-//   (commits 7681764/7ad0193 and predecessors) — these assertions are expected to PASS.
-// #205 result.advisories[], #206 legs[].total_cents, #203/#207 forbiddenMessage/
-//   SESSION_INVALID_MESSAGE: each exists ONLY on its own open, unmerged PR branch
-//   (feat/render-advisories #28, feat/perleg-cost-breakdown #29,
-//   feat/session-invalid-message #30) as of this writing — NOT on main. This spec
-//   was intentionally still written against the real mechanism read directly off
-//   those branches (exact data-testids / exported symbols confirmed via
-//   `git show <branch>:<file>`) so it becomes the enforcement gate the moment any
-//   of those 3 PRs merge. Until then, the corresponding assertions below are
-//   EXPECTED TO FAIL against current main — see the run-results notes in the
-//   final report for exactly which passed/failed on this run.
+// Covers: planning_note, day_plans notes, hop disambiguation, result.advisories[],
+// legs[].total_cents, and the forbiddenMessage/SESSION_INVALID_MESSAGE re-login copy.
 //
 // Both fixtures are hermetic: /negotiate_text and /refine are mocked via page.route.
 // OSM tiles are aborted (offline-safe). A guest session is pre-seeded so the
@@ -42,7 +30,7 @@ const DAYPLAN_NOTE =
 // whose server-formatted labels are byte-identical")
 const HOP_LABEL = '~20 min, metro, est. (from city centre — exact hotel location unavailable)';
 
-// #205 — RightRail.advisories.test.ts (feat/render-advisories, PR #28, unmerged)
+// #205 — RightRail.advisories.test.ts
 const ADVISORY_VISA =
   'Entry requirements not verified for this nationality/destination pair — confirm visa ' +
   'eligibility with the destination government before travel.';
@@ -50,11 +38,11 @@ const ADVISORY_HEALTH =
   'Required vaccination status not verified — confirm yellow fever certificate requirements ' +
   'before travel.';
 
-// #206 — Itinerary.perleg-cost.test.ts (feat/perleg-cost-breakdown, PR #29, unmerged)
+// #206 — Itinerary.perleg-cost.test.ts
 const LEG_TOTAL_CENTS = 68000;              // $680.00
 const LEG_COST_BASIS_LABEL = 'Prepaid via secure checkout';
 
-// #203/#207 — api.test.ts on feat/session-invalid-message (PR #30, unmerged):
+// #203/#207 — api.test.ts:
 // forbiddenMessage({reason:'session_invalid'}) === SESSION_INVALID_MESSAGE
 const SESSION_INVALID_MESSAGE = 'Your session expired — log in again and retry.';
 const NOT_TRIP_OWNER_MESSAGE = 'This trip belongs to another session.'; // current main's ONLY forbidden copy
@@ -70,7 +58,7 @@ const PLAN_WITH_HONESTY_FIELDS: Record<string, unknown> = {
   wallet: { balance_cents: 300000, held_cents: LEG_TOTAL_CENTS, debited: false },
   legs: [{
     leg_id: 'leg-0', city: 'Kyoto', checkin: '2027-04-10', checkout: '2027-04-14',
-    // #206 — per-leg lodging cost + honesty basis (feat/perleg-cost-breakdown, unmerged)
+    // #206 — per-leg lodging cost + honesty basis
     total_cents: LEG_TOTAL_CENTS,
     cost_basis: 'ucp_prepaid',
     cost_basis_label: LEG_COST_BASIS_LABEL,
@@ -110,7 +98,7 @@ const PLAN_WITH_HONESTY_FIELDS: Record<string, unknown> = {
       planning_note: PLANNING_NOTE,
     }],
   },
-  // #205 — orchestrator-pooled trip-level honesty advisories (feat/render-advisories, unmerged)
+  // #205 — orchestrator-pooled trip-level honesty advisories
   advisories: [ADVISORY_VISA, ADVISORY_HEALTH],
 };
 
@@ -167,10 +155,7 @@ test('consolidated honesty envelope: planning_note, day_plans notes, hop disambi
     expect.soft(hop1 ?? '').toContain(HOP_LABEL);
   });
 
-  // ── #206: legs[].total_cents / cost_basis_label — Itinerary.svelte leg header.
-  // NOTE: as of this writing this render site exists only on the unmerged
-  // feat/perleg-cost-breakdown branch (PR #29) — expected to FAIL against main
-  // until that PR lands; kept here so the gate is ready the moment it does. ─────
+  // ── #206: legs[].total_cents / cost_basis_label — Itinerary.svelte leg header. ─
   await test.step('#206 per-leg cost total + cost_basis_label render under the leg header', async () => {
     const legCostAmount = page.getByTestId('leg-cost-amount-0');
     await expect.soft(legCostAmount).toHaveText('$680.00');
@@ -190,9 +175,7 @@ test('consolidated honesty envelope: planning_note, day_plans notes, hop disambi
   });
 
   // ── #205: result.advisories[] — RightRail Safety tab, trip-level (above the
-  // per-leg risk cards). NOTE: as of this writing this render site exists only on
-  // the unmerged feat/render-advisories branch (PR #28) — expected to FAIL against
-  // main until that PR lands; kept here so the gate is ready the moment it does. ─
+  // per-leg risk cards). ─────────────────────────────────────────────────────
   await test.step('#205 result.advisories[] renders every entry in the Safety tab', async () => {
     const advisories = page.getByTestId('advisory-item');
     await expect.soft(advisories).toHaveCount(2);
@@ -205,14 +188,10 @@ test('consolidated honesty envelope: planning_note, day_plans notes, hop disambi
 // ── #203/#207: 403 session_invalid → actionable message via a real /refine ──────
 // Drives the ACTUAL user action (typing a follow-up on a held plan, which App.svelte
 // routes to /refine since activePlan.idempotency_key is set and uiState==='plan_ready')
-// rather than hand-calling forbiddenMessage()/isForbidden() in isolation.
-//
-// NOTE: as of this writing, forbiddenMessage()/SESSION_INVALID_MESSAGE exist only on
-// the unmerged feat/session-invalid-message branch (PR #30); main's App.svelte still
-// renders the generic NOT_TRIP_OWNER_MESSAGE for EVERY {outcome:'forbidden'} body
-// regardless of `reason`. This assertion is expected to FAIL against main until that
-// PR lands — kept here (with the exact mechanism confirmed off the branch diff) so the
-// gate is ready the moment it does.
+// rather than hand-calling forbiddenMessage()/isForbidden() in isolation. Distinguishes
+// the actionable SESSION_INVALID_MESSAGE re-login copy from the generic
+// NOT_TRIP_OWNER_MESSAGE, which App.svelte renders for every other {outcome:'forbidden'}
+// body regardless of `reason`.
 test('403 forbidden reason:session_invalid shows the actionable re-login message via a real /refine action', async ({ page }) => {
   await seedGuestSession(page);
 

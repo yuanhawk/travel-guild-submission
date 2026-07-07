@@ -1,7 +1,7 @@
 """
 orchestrator.py — Travel Guild M3a negotiation conductor (M2 + Critic gate + DP allocator).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §4.2, §4.3, §4.5, §4.6, §0.2, §3.6, §2.1.
+Design contract: the internal design spec §4.2, §4.3, §4.5, §4.6, §0.2, §3.6, §2.1.
 
 The TravelOrchestrator drives the multi-agent negotiation:
 

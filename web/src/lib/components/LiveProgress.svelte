@@ -7,7 +7,7 @@
 <section class="live" data-testid="live-progress">
   <header class="lp-head">
     <span class="pulse" aria-hidden="true"></span>
-    <h3>Your society of agents is planning</h3>
+    <h3>Your Travel Guild agents are planning</h3>
     <span class="round">{progress.round ? `Round ${progress.round}` : ''}</span>
   </header>
   <p class="phase" data-testid="live-phase">{progress.phase}</p>

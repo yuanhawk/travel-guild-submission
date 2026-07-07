@@ -21,7 +21,7 @@ Tests (CI-safe, mock merchant, no LLM, no network):
   (e) test_secondary_determinism
         Same fault on same baseline → identical recovery plan every run (variance-0).
 
-Design: §12.8 §12.9 (AGENT-SOCIETY-A2A-DESIGN.md).
+Design: §12.8 §12.9 (the internal design spec).
 """
 
 from __future__ import annotations

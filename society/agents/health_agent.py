@@ -3930,7 +3930,7 @@ class HealthAgent(A2AAgent):
                 "integer values from the seeded CDC slate); the LLM only drafts validated "
                 "cosmetic summary. Per-user allergy / fitness are OUT OF SCOPE (surfaced, not "
                 "owned). Implements 'health.assess' + 'health.explain'. Part of the Travel "
-                "Society multi-agent pipeline (Track 3, L2 / DC-health)."
+                "Guild multi-agent pipeline (Track 3, L2 / DC-health)."
             ),
             "url": url,
             "version": "1.0.0",

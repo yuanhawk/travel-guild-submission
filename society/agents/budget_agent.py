@@ -1,7 +1,7 @@
 """
 budget_agent.py — Budget/Finance A2A agent (Travel Guild M1).
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §3.2, §0.2, §4.6.
+Design contract: the internal design spec §3.2, §0.2, §4.6.
 
 Agent Card skills:
   ``budget.check``   — CHECK phase: create_checkout only (no capture).

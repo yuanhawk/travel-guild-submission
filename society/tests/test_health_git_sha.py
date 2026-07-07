@@ -71,14 +71,14 @@ class TestHealthGitShaFallback:
     """Regression coverage for the path the real deploy target actually hits:
     no .git dir (rsync --exclude='.git'), so `git rev-parse HEAD` can't run
     and _resolve_git_sha() must fall through to GIT_SHA env / "unknown".
-    This is what ops/deploy-staging.sh's SHA stamp (writing GIT_SHA= into the
-    systemd EnvironmentFile before restart) depends on actually working.
+    This is what a deploy's SHA stamp (writing GIT_SHA= into the
+    process environment before restart) depends on actually working.
     """
 
     def test_resolve_git_sha_falls_back_to_env_var_when_git_unavailable(self) -> None:
         """When `git rev-parse HEAD` fails (e.g. no .git dir on the deploy
         target), _resolve_git_sha() must fall back to the GIT_SHA env var —
-        this is exactly what ops/deploy-staging.sh relies on."""
+        this is exactly what a coordinated deploy relies on."""
         fake_sha = "a" * 40
         failed = subprocess.CompletedProcess(args=["git"], returncode=128, stdout="", stderr="fatal: not a git repository")
         with patch("subprocess.run", return_value=failed), patch.dict(os.environ, {"GIT_SHA": fake_sha}, clear=False):
@@ -87,7 +87,7 @@ class TestHealthGitShaFallback:
 
     def test_resolve_git_sha_falls_back_to_unknown_when_git_and_env_both_absent(self) -> None:
         """When git resolution fails AND no GIT_SHA env var is set (e.g. a
-        deploy target that predates ops/deploy-staging.sh's SHA stamp),
+        deploy target that predates the SHA-stamping convention),
         _resolve_git_sha() must return the honest 'unknown' fallback rather
         than raising or fabricating a value."""
         failed = subprocess.CompletedProcess(args=["git"], returncode=128, stdout="", stderr="fatal: not a git repository")

@@ -55,7 +55,7 @@ describe('<LiveProgress> — roster rendering', () => {
 
   it('initial phase line renders', () => {
     const c = mount(initProgress());
-    expect(c.getByTestId('live-phase').textContent).toContain('Waking the society');
+    expect(c.getByTestId('live-phase').textContent).toContain('Waking the Travel Guild');
   });
 });
 

@@ -118,8 +118,7 @@ describe('Safety tab humanizes advisory[].type (no raw snake_case keys)', () => 
   });
 });
 
-// Adversarial review (2026-07-06): orchestrator.py's
-// D2 block lifts every risk_signals.per_leg[].advisory[].detail verbatim into the
+// orchestrator.py's D2 block lifts every risk_signals.per_leg[].advisory[].detail verbatim into the
 // trip-level result.advisories[] "so a flag is never buried inside risk_signals" —
 // but the Safety tab then rendered BOTH the trip-level list AND the per-leg detail,
 // so every advisory paragraph appeared twice (the "wall of text" in the footage).

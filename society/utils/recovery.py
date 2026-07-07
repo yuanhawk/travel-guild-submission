@@ -1,7 +1,7 @@
 """
 recovery.py — L3-core reactive disruption-recovery for the Travel Guild.
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §12.8 (reduced cut), §12.9
+Design contract: the internal design spec §12.8 (reduced cut), §12.9
 (two-tier reactivity + baseline/secondary + pressure-test).
 
 ## Overview

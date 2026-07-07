@@ -27,7 +27,7 @@ import (
 	"sort"
 )
 
-const walletSimNote = "SIMULATED prepaid wallet — settlement-layer state seeded from the input balance; no real money moves (mirrors the Alipay sim, KIV)."
+const walletSimNote = "SIMULATED prepaid wallet — settlement-layer state seeded from the input balance; no real money moves (see alipay_sim.go for the simulated settlement rail this mirrors)."
 
 // walletEntry is one immutable ledger line. AmountCents is a POSITIVE magnitude;
 // Type ("debit"|"credit") gives the sign. Seq is the monotonic order key.
@@ -367,9 +367,9 @@ func dispatchWalletGet(st *store, cfg config, agentID string, p toolCallParams) 
 	return v, http.StatusOK
 }
 
-// walletSimAdminHandler serves the /admin/sim/wallet endpoint (mirrors the Alipay
-// admin endpoint): GET → all wallet summaries; POST {wallet_session_id,
-// wallet_balance_cents} → fund/reset.
+// walletSimAdminHandler serves the /admin/sim/wallet endpoint (mirrors the
+// alipay_sim.go admin endpoint): GET → all wallet summaries; POST
+// {wallet_session_id, wallet_balance_cents} → fund/reset.
 func walletSimAdminHandler(st *store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

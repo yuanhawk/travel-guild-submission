@@ -1,7 +1,7 @@
 """
 intent_parser.py — M-Agentic-1 intent parser for the Travel Guild.
 
-Design contract: AGENT-SOCIETY-A2A-DESIGN.md §M-Agentic-1, §10.11.
+Design contract: the internal design spec §M-Agentic-1, §10.11.
 
 Converts free-text travel requests into validated trip_request dicts suitable
 for TravelOrchestrator.negotiate(). Runs ONCE per request — never inside the
@@ -1821,7 +1821,7 @@ def _clamp_and_validate(
     #
     # #honesty-fix (silent-date-fallback): DEFAULT_START_DATE exists purely to keep the
     # benchmark harness deterministic (it always calls parse_intent with dateless free
-    # text — see benchmark/runners/society_arm.py:_build_free_text_request). Live/
+    # text). Live/
     # interactive callers go through negotiate_from_text(), which reads the
     # `assumed_start_date` flag set below and attaches an honest user-facing note
     # instead of silently pricing insurance / running season-sensitive risk & health
