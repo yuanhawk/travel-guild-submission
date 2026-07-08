@@ -3,8 +3,9 @@
   "method": "GET",
   "path": "/trips/{idempotency_key}",
   "kind": "path_query",
-  "note": "Logged-in variant — api.ts getTrip() always sends owner_token as a query param, and ALSO sends session_token when logged in (authFields().session_token is truthy). Both tokens present here to exercise the richer branch.",
+  "note": "Logged-in variant — api.ts getTrip() always sends owner_token as the X-Owner-Token request header, and ALSO sends session_token as X-Session-Token when logged in (authFields().session_token is truthy). SECURITY FIX: both moved from query params to headers (secrets-in-URL fix — bearer tokens must never land in access logs/browser history/Referer headers). Both present here to exercise the richer branch.",
   "path_template": "/trips/{idempotency_key}",
   "path_params": { "idempotency_key": "gr-trip-key" },
-  "query": { "owner_token": "gr-owner-token", "session_token": "gr-session-token" }
+  "query": {},
+  "headers": { "x-owner-token": "gr-owner-token", "x-session-token": "gr-session-token" }
 }

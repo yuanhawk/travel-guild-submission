@@ -74,6 +74,13 @@ function capturedQuery(): { path: string; query: Record<string, string> } {
   const url = new URL((f as unknown as MockedFetch).mock.calls[0][0], 'http://golden-fixture.invalid');
   return { path: url.pathname, query: Object.fromEntries(url.searchParams.entries()) };
 }
+// SECURITY (secrets-in-URL fix): session_token/owner_token now ride as request
+// headers (X-Session-Token / X-Owner-Token), not query params — capture them
+// the same way capturedQuery() captures the URL.
+function capturedHeaders(): Record<string, string> {
+  const init = (f as unknown as MockedFetch).mock.calls[0][1];
+  return Object.fromEntries(new Headers(init?.headers).entries());
+}
 
 beforeEach(() => { api.__clearPlaceCardCache(); });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
@@ -174,19 +181,20 @@ describe('golden request query params (GET)', () => {
     expect(c.query).toEqual(list_my_trips.query);
   });
 
-  it('getPreferences → /preferences?user_id=', async () => {
+  it('getPreferences → /preferences?user_id= (session_token via X-Session-Token header)', async () => {
     mockFetch({ user_id: 'demo-lena' });
     await api.getPreferences(get_preferences.query.user_id);
     expect(capturedQuery().query).toEqual(get_preferences.query);
   });
 
-  it('getTelegramLinkToken → /telegram/link?user_id=&session_token=', async () => {
+  it('getTelegramLinkToken → /telegram/link?user_id= (session_token via x-session-token header)', async () => {
     mockFetch({ available: false });
     await api.getTelegramLinkToken(
       get_telegram_link_token.query.user_id,
-      get_telegram_link_token.query.session_token,
+      get_telegram_link_token.headers['x-session-token'],
     );
     expect(capturedQuery().query).toEqual(get_telegram_link_token.query);
+    expect(capturedHeaders()).toEqual(get_telegram_link_token.headers);
   });
 
   it('getEmergencies → /emergencies (no params)', async () => {
@@ -197,12 +205,13 @@ describe('golden request query params (GET)', () => {
     expect(c.query).toEqual({}); // fixture query is {}
   });
 
-  it('getTrip → /trips/{key}?owner_token=&session_token=', async () => {
+  it('getTrip → /trips/{key} (owner_token/session_token via X-Owner-Token/X-Session-Token headers)', async () => {
     mockFetch({ outcome: 'plan_ready' });
     await api.getTrip(get_trip.path_params.idempotency_key);
     const c = capturedQuery();
     expect(c.path).toBe(`/trips/${encodeURIComponent(get_trip.path_params.idempotency_key)}`);
-    expect(c.query).toEqual(get_trip.query); // { owner_token, session_token }
+    expect(c.query).toEqual(get_trip.query); // {}
+    expect(capturedHeaders()).toEqual(get_trip.headers); // { X-Owner-Token, X-Session-Token }
   });
 });
 
