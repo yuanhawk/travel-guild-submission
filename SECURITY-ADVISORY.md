@@ -94,7 +94,7 @@ Found by an audit of `society/orchestration/server.py` and its dependents; all 9
 
 **Fix:** Both middlewares now cover `PUT` as well as `POST`; the rate limiter was additionally extended to the previously-exempt token-gated GET endpoints (`/trips`, `/trips/{key}`, `/preferences`, `/telegram/link`).
 
-**Verified:** `server.py:263` (`_RateLimitMiddleware`), `server.py:302` (`_TokenAuthMiddleware`).
+**Verified:** `server.py:220` (`_RateLimitMiddleware`), `server.py:285` (`_TokenAuthMiddleware`).
 
 ### 9. Raw DashScope error bodies embedded in exception messages — Medium
 
@@ -102,7 +102,7 @@ Found by an audit of `society/orchestration/server.py` and its dependents; all 9
 
 **Fix:** The raw body is now logged server-side only; the exception message carries just the HTTP status code.
 
-**Verified:** `intent_parser.py:6048-6058`; `destination_agent.py:445-452`.
+**Verified:** `intent_parser.py:5380-5383`; `destination_agent.py:445-452`.
 
 ---
 

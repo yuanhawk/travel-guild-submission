@@ -49,10 +49,11 @@ structural checks** no single-prompt agent has:
 | 4 | **Can't spend without authorization** | **one human consent** per package; any swap/recovery needs fresh re-consent (the AP2 mandate binds the checkout) |
 | 5 | **Can't flake** | LLM reasoning is clamped behind deterministic validators → correctness **variance ≈ 0** across runs |
 
-Eleven specialist agents (Budget, Destination, Accommodation, Transport,
-Day-planner, Critic, Risk, Insurance, Visa/Compliance, Health, Fraud), each a
-single non-overlapping authority — plus the orchestrator's one-consent gate as
-the architecture's twelfth safety property (not a peer agent module).
+Twelve specialist agents (Planner, Budget, Destination, Accommodation,
+Transport, Day-planner, Critic, Risk, Insurance, Visa/Compliance, Health,
+Fraud), each a single non-overlapping authority — plus the orchestrator's
+one-consent gate as the architecture's thirteenth safety property (not a peer
+agent module).
 
 ---
 
@@ -60,7 +61,7 @@ the architecture's twelfth safety property (not a peer agent module).
 
 ```
 society/                the agent core (internal codename)
-  agents/                11 specialist A2A agents — one authority each
+  agents/                12 specialist A2A agents — one authority each
   orchestration/         negotiation orchestrator + HTTP server
   providers/             the var-0 firewall seam (edition.py), the fail-closed
                          booking-authority seam (booking.py)
