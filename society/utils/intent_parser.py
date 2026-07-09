@@ -424,10 +424,7 @@ CITY_ALIASES: dict[str, str] = {
     "constantinople": "istanbul",
     "byzantium": "istanbul",
     "krung thep": "bangkok",
-    # fix-round-3: "Rio" — the ubiquitous everyday colloquial short name for
-    # Rio de Janeiro (a fully supported, top-tier catalog city) had no alias
-    # at all, so it was flagged as an unknown destination and dropped/
-    # declined even though the real city is bookable.
+    # Common colloquial short name -> catalog slug.
     "rio": "rio de janeiro",
     # Bali districts — catalog stores all as city="bali"; so "Canggu" or "Ubud" in
     # a user message (including clarification follow-ups) must resolve to "bali", not decline.
@@ -487,68 +484,22 @@ def _build_city_regex() -> tuple[re.Pattern[str], dict[str, str]]:
 # Pre-built at module load — shared across _scan_city_sequence / _pair_cities_with_vibes.
 _CITY_RE, _CITY_TOKEN_TO_SLUG = _build_city_regex()
 
-# #2 — Common English words that are ALSO catalog city names. A bare occurrence
-# ("surprise me", "on sale", "nice beaches", "a hot bath", "mobile phone") must NOT
-# route to the city; require a destination CUE — a preceding preposition/verb ("fly
-# to Surprise", "a week in Nice") OR a trailing ", <region>" ("Nice, France") — so the
-# city only matches when genuinely named. (Live testing booked "...the Philippines,
-# nice beaches" to Nice, France — so nice/bath/mobile are cue-required now. "split" is
-# handled separately by _CONNECTIVE_CITY_VERBS; "york" stays bare-matchable. "reading"
-# was ALSO bare-matchable historically, but it is a very common gerund in trip-vibe
-# phrasing ("a quiet week of reading, somewhere warm") and silently resolved to
-# Reading, UK — cue-required now, same as nice/bath/mobile; "reading, england" /
-# "reading uk" / "trip to reading" still resolve via the normal cue path.
-# 2026-07-04/05 batch: "sakura" (cherry-blossom SEASON word, "for the sakura season")
-# fabricated a phantom Sakura, Chiba leg on Tokyo trips; "phoenix"/"providence"/
-# "orange"/"concord"/"buffalo" are common nouns/idioms ("like a phoenix", "divine
-# providence", "orange groves", "reached a concord", "buffalo wings"); "charlotte"/
-# "jackson"/"hamilton"/"guadalupe" are everyday given names / cultural references most
-# dangerous in party-composition text ("my daughter charlotte", "my son jackson", "see
-# hamilton", "our lady of guadalupe"); "florence"/"victoria"/"valencia" are also genuine
-# tourist cities but equally common given names / product nouns ("aunt florence", "my
-# friend victoria", "valencia orange juice") — all reproduced live as spurious extra
-# legs. Cue-required now, same pattern as nice/bath/mobile/reading; cued/regioned
-# forms ("to Phoenix, Arizona", "Florence, Italy", "trip to Victoria") still resolve.)
+# Common English words (and everyday given names) that are ALSO catalog city names.
+# A bare occurrence ("surprise me", "on sale", "nice beaches", "my son jackson") must
+# NOT route to the city; require a destination CUE — a preceding preposition/verb
+# ("fly to Surprise", "a week in Nice") OR a trailing ", <region>" ("Nice, France") —
+# so the city only matches when genuinely named. A looser, cue-free suppression was
+# tried for the given-name subset and reverted after several rounds of adversarial
+# review kept finding new false-positive classes (person-name prose, narrative verbs,
+# coordination/duration heuristics): an enumerated "which context means a person"
+# exception list is structurally unclosable, so the strict cue-required rule below is
+# the one true policy for this whole set. Illustrative set — extend as new collisions
+# surface; not exhaustive.
 _AMBIGUOUS_CITY_WORDS: frozenset[str] = frozenset({
     "surprise", "sale", "paradise", "enterprise", "independence",
     "normal", "why", "boring", "accident", "between", "hope", "general",
-    "nice", "bath", "mobile", "reading",
+    "nice", "bath", "mobile", "reading", "metro",
     "sakura", "providence", "orange", "concord", "buffalo",
-    # fix-round-2: "metro" (Metro, Lampung, Indonesia) is an everyday transport
-    # noun ("take the metro", "the metro system") far more often than a real
-    # destination mention — fabricated a phantom Metro, Indonesia leg on any
-    # single-city trip that mentioned using the subway. Its "metro"->"city"
-    # vibe synonym was removed at the same time (see _VIBE_SYNONYMS) so cueing
-    # it here doesn't just trade one false positive for another.
-    "metro",
-    # adversarial-review (2026-07-06): "phoenix"/"charlotte"/"jackson"/
-    # "hamilton"/"guadalupe"/"florence"/"victoria"/"valencia" were given a
-    # SEPARATE, looser suppression rule for one night (real destinations that
-    # are ALSO common given names/cultural references), on the theory that
-    # requiring the same strict destination-cue as "nice"/"bath" over-
-    # suppressed genuine bare bookings ("florence, 5 nights, $2000") and
-    # silently dropped a city from an explicit multi-city list ("rome and
-    # florence, 6 nights"). That looser rule went through FOUR rounds of
-    # adversarial review; each round's fix for one fabricated-leg
-    # class opened a new one (round 1: coordination/duration heuristics
-    # fabricated legs on ordinary person-name prose -- "meeting Jackson and
-    # then flying to Tokyo"; round 2: the narrative-verb-list missed "was"
-    # as a legitimate copula and wrongly suppressed real trips; round 3
-    # found the SAME class again from a different angle -- "we won't skip
-    # florence" / Oxford commas / "&"/"or" coordination / spelled-out
-    # durations). Diagnosis: an enumerated exception list
-    # (which verbs count as "a person", which connectors count as "a list")
-    # is structurally unclosable -- the exact lesson this file already
-    # learned from the non-Latin-script deny-list saga, just in reverse.
-    # Reverted to the strict, conservative rule these words shared with
-    # nice/bath/surprise before that attempt: a bare mention needs a real
-    # destination cue or trailing ", Region" to resolve. This reintroduces
-    # the original bare-decline/silent-list-drop complaint, but an honest
-    # decline is safer than a fabricated leg -- and closes every regression
-    # class the four rounds found. A real fix needs an actual person/place
-    # disambiguation signal (e.g. routing through proper NER, or requiring
-    # the LLM assist path), not another regex exception list. Tracked as a
-    # follow-up, not reopened as a same-night patch.
     "phoenix", "charlotte", "jackson", "hamilton", "guadalupe",
     "florence", "victoria", "valencia",
 })
@@ -556,18 +507,10 @@ _DEST_CUE_WORDS = (
     r"to|in|at|near|from|via|visit|visiting|explore|exploring|see|stay|"
     r"staying|holiday|vacation|trip|fly|flying|land|arrive|arriving|go|going|"
     r"toward|towards|into|"
-    # fix-round-2: "decided on Thailand" / "settled on Spain" — an equally
-    # unambiguous travel-DECISION cue (root cause of a silent wrong-country
-    # booking when a different country was merely discussed earlier in the
-    # sentence as its topic, not the decided destination).
+    # "decided on Thailand" / "settled on Spain" — an unambiguous travel-DECISION
+    # cue. "book me Thailand" / "planning Thailand" — common booking/action verbs;
+    # "book" tolerates an optional intervening "me".
     r"decided\s+on|settled\s+on|"
-    # fix-round-4: "book me Thailand" / "planning Thailand" — common
-    # booking/action verbs, missing from this cue list, caused a bare-country
-    # request phrased this way to fail the destination-use gate and hard-
-    # decline, even though the IDENTICAL phrasing with a catalog CITY ("book
-    # me Bali") resolves fine (city hits bypass this gate entirely). "book"
-    # tolerates an optional intervening "me" so the cue still reaches the
-    # country name directly.
     r"book(?:\s+me)?|planning"
 )
 _DEST_CUE_RE = re.compile(r"(?:\b(?:" + _DEST_CUE_WORDS + r")\s+)$", re.I)
@@ -629,14 +572,11 @@ _COUNTRY_RE = re.compile(
     re.I,
 )
 
-# fix-round-1: the DESTINATION-USE GATE below (_is_subject/_has_cue/_dur_before)
-# only inspects the text BEFORE the matched country, so a country name that is
-# also an English homonym used as a noun-MODIFIER of the following word ("turkey
-# hunting" — the bird, "china shop"/"china painting" — crockery/porcelain) still
-# gets substituted whenever a duration or cue happens to sit before it ("spent 3
-# weeks turkey hunting..."). Curated, closed set of following nouns that turn the
-# country word into an ordinary noun phrase rather than a destination — checked
-# AFTER the country match, regardless of what precedes it.
+# The DESTINATION-USE GATE below (_is_subject/_has_cue/_dur_before) only inspects the
+# text BEFORE the matched country, so a country name that is also an English homonym
+# used as a noun-MODIFIER of the FOLLOWING word ("turkey hunting" — the bird, "china
+# shop" — crockery) still gets substituted. Curated, closed set of following nouns
+# that turn the country word into an ordinary noun phrase, checked after the match.
 _COUNTRY_HOMONYM_FOLLOWING_RE = re.compile(
     r"^\s*(?:hunting|sandwich(?:es)?|dinner|leg|breast|bacon|burger|meat|gravy|"
     r"shop|shops|cabinet|pattern|painting|plate|plates|dish|dishes|doll|dolls|"
@@ -687,16 +627,10 @@ def _substitute_country_with_city(text: str) -> str:
     # Such phrases must DECLINE — leave the text unchanged so no city is fabricated.
     if _REGION_EXCLUDE_RE.search(lowered):
         return text
-    # fix-round-2: evaluate EVERY country mention in the text (not just the
-    # first _COUNTRY_RE match) and prefer one with an explicit travel CUE or
-    # a duration right before it over one that is merely the grammatical
-    # SUBJECT of the sentence. A sentence can open by naming/discussing a
-    # country as its topic without that being the destination at all
-    # ("France is overrated, fly me to Portugal instead", "Japan's temples
-    # are stunning, but let's go to Thailand") — the bare-subject heuristic
-    # alone previously grabbed the FIRST such country regardless of a much
-    # stronger, explicitly-cued mention of a DIFFERENT country later in the
-    # same sentence, silently booking the wrong country.
+    # Evaluate EVERY country mention (not just the first), preferring one with an
+    # explicit travel cue/duration before it over one that is merely the sentence
+    # subject — a sentence can open by discussing a country topically without that
+    # being the destination ("Japan's temples are stunning, but let's go to Thailand").
     _strong_candidate = None
     _subject_candidate = None
     for m in _COUNTRY_RE.finditer(lowered):
@@ -728,14 +662,8 @@ def _substitute_country_with_city(text: str) -> str:
         )
         if _qm:
             pre_core = (pre_core[:_qm.start()] + _qm.group("keep")).rstrip()
-        # fix-round-3: a possessive GENITIVE ("Japan's temples are
-        # stunning") makes the country a noun-MODIFIER of what follows, not
-        # a destination — topical prose about a country, not a trip to it.
-        # _COUNTRY_RE's \b boundary matches "japan" inside "japan's" (the
-        # apostrophe is a non-word char), and a possessive at sentence start
-        # otherwise satisfies the bare-subject heuristic below, so without
-        # this check a purely topical remark got silently rewritten to the
-        # country's gateway city and booked as a real trip.
+        # A possessive genitive ("Japan's temples are stunning") makes the country a
+        # noun-modifier of what follows, not a destination — topical prose, not a trip.
         _is_possessive_topic = bool(re.match(r"['’]s\b", lowered[m.end():]))
         _is_subject = (
             pre_core.strip() in ("", "the", "a", "an") and not _is_possessive_topic
@@ -748,10 +676,8 @@ def _substitute_country_with_city(text: str) -> str:
             pre_core))
         if not (_is_subject or _has_cue or _dur_before):
             continue
-        # fix-round-1: the country name is a noun-modifier of the FOLLOWING word
-        # ("turkey hunting", "china shop"/"china painting") — a common-noun use,
-        # not a destination, regardless of what precedes it (a duration/cue before
-        # the word is exactly what "spent 3 weeks turkey hunting" has).
+        # The country name may be a noun-modifier of the FOLLOWING word ("turkey
+        # hunting", "china shop") — a common-noun use, not a destination.
         if _COUNTRY_HOMONYM_FOLLOWING_RE.match(lowered[m.end():]):
             continue
         name = _COUNTRY_NAME_ALIASES.get(m.group(1), m.group(1))
@@ -770,14 +696,8 @@ def _substitute_country_with_city(text: str) -> str:
     if chosen is None:
         return text
     m, city, _qual_start_in_text = chosen
-    # fix-round-4: an explicit "<Country> or <Country>" disjunction ("Thailand
-    # or Vietnam") means the traveler has NOT decided between two options —
-    # the loop above only ever considers the FIRST option a destination-use
-    # candidate (the second is not travel-cued and is skipped), so this
-    # silently committed to the first country with no signal that a choice
-    # was made for the user. That is exactly the topic-vs-destination
-    # consent failure this gate exists to prevent, so decline (leave the
-    # text unchanged) instead of silently picking one.
+    # An explicit "<Country> or <Country>" disjunction means the traveler hasn't
+    # decided — decline (leave the text unchanged) rather than silently pick one.
     _or_m = re.match(r"\s+or\s+", lowered[m.end():])
     if _or_m and _COUNTRY_RE.match(lowered[m.end() + _or_m.end():]):
         return text
@@ -1278,12 +1198,8 @@ _VIBE_SYNONYMS: dict[str, str] = {
     "urban": "city",
     "downtown": "city",
     "citybreak": "city",
-    # fix-round-2: "metro" REMOVED as a vibe synonym. It collides with the
-    # extremely common transport noun ("take the metro", "the metro system")
-    # far more often than it's used to mean "metropolitan/city" — and adding
-    # "metro" to _AMBIGUOUS_CITY_WORDS (to stop it bare-matching as a phantom
-    # Metro, Indonesia leg) would have UNMASKED this synonym, turning "take
-    # the metro" into a spurious vibe=city instead. See _AMBIGUOUS_CITY_WORDS.
+    # "metro" deliberately NOT a synonym here — collides with the transport noun
+    # ("take the metro") far more often than "metropolitan/city".
     "nightlife": "city",
     "shopping": "city",
     # adventure
@@ -1627,43 +1543,20 @@ def _scan_start_date_raw(text: str, today: str | None = None) -> tuple[str | Non
         #     subject to attach to; or (b) it directly follows "around"/"about"
         #     ("sometime around March", "go around March") — a phrasing that is never
         #     how the modal "may" or verb "march" would appear.
-        # fix-round-1: closes the false "No travel dates were given" honesty-note gap
-        # for exactly these three ambiguous months in natural comma-delimited phrasing.
-        # fix-round-2: the round-1 rescue only covered "the very first token" and
-        # "around/about" — very common natural hedging phrasings ("thinking May",
-        # "planning May", "maybe May", "probably May", "looking at May", "leaning
-        # towards May", "ideally May") still fell through to `return None, False`,
-        # silently anchoring the trip to the Oct default with a false "no dates
-        # given" note even though the user clearly named a month.
+        # Closes the false "No travel dates were given" honesty-note gap for exactly
+        # these three ambiguous months across a range of natural hedging phrasings
+        # ("thinking May", "planning for May", "maybe May") — otherwise the trip
+        # silently anchors to the default with a false "no dates given" note even
+        # though the user clearly named a month.
         if dm.group(0).strip().lower() in {"may", "march", "august"}:
             _pre_text = text[:dm.start()]
             _bare_month_rescued = (
                 _pre_text.strip() == ""
                 or re.search(
-                    # fix-round-2: an optional trailing article ("a"/"an") after the
-                    # hedge verb closes "planning A March trip" / "thinking AN August
-                    # getaway" — the article is not itself a rescue signal (bare "a
-                    # march" can mean a protest march), only a hedge-verb + article
-                    # combination is.
-                    # fix-round-3: commitment/intent verbs semantically identical to
-                    # the ones already here ("shooting for"/"pushing for"/"targeting"/
-                    # "prefer"/"want"/"let's do"/"let's say") were still missing —
-                    # the very same "state a month with no subject to attach a modal/
-                    # verb reading to" logic applies to them, just an incomplete
-                    # enumeration of the surface forms.
-                    # fix-round-4: two more residual gaps in this same rescue.
-                    #   (1) the hedge-verb tail anchor required the verb to sit
-                    #       IMMEDIATELY before the month (only an "a"/"an" article
-                    #       tolerated in between) — but "thinking OF May", "free
-                    #       FOR May"/"free DURING May", and "planning FOR May" all
-                    #       insert a preposition the anchor did not tolerate, so
-                    #       these extremely natural phrasings fell through.
-                    #   (2) plain desire verbs ("would like"/"would love"/"like"/
-                    #       "love") and the availability phrasing "free" were
-                    #       missing from the verb list entirely, and a natural
-                    #       date-window modifier ("early"/"late"/"mid") between the
-                    #       verb/preposition and the month broke even an already-
-                    #       whitelisted hedge verb ("shooting for early August").
+                    # A hedge/commitment verb (optionally + preposition, optional
+                    # article, optional early/late/mid modifier) right before the
+                    # month means the month can't be a modal/verb reading (no subject
+                    # to attach to) — it's a genuine month statement.
                     r"\b(?:around|about|thinking|planning|maybe|probably|ideally|"
                     r"considering|looking\s+at|leaning\s+towards?|hoping\s+for|"
                     r"aiming\s+for|shooting\s+for|pushing\s+for|targeting|prefer|"
@@ -1673,14 +1566,9 @@ def _scan_start_date_raw(text: str, today: str | None = None) -> tuple[str | Non
                     r"(?:\s+(?:early|late|mid))?\s*$",
                     _pre_text, re.I,
                 ) is not None
-                # fix-round-3: destination-first, comma-delimited phrasing
-                # ("Tokyo, March, 7 nights, $3000") is the single most natural
-                # way to state a trip, but the month sits right after a plain
-                # trailing comma with no hedge verb at all. A comma directly
-                # before the month closes the PRECEDING clause, so the month
-                # cannot be read as a verb/modal continuing it (that reading
-                # needs a subject in the SAME clause) — it unambiguously opens
-                # a new, bare month-naming segment.
+                # Destination-first, comma-delimited phrasing ("Tokyo, March, 7
+                # nights, $3000") — a comma directly before the month closes the
+                # preceding clause, so the month can't be a verb/modal continuing it.
                 or re.search(r",\s*$", _pre_text) is not None
             )
             if not _bare_month_rescued:
@@ -2226,29 +2114,16 @@ _FILLER = r"(?:\s+" + _FILLER_WORD + r"){0,3}"
 # (the city) never carries a trailing decomposition prep, so it won't form a span.
 _DEST_CUE_BEFORE = r"(?:\bin\b|\bvisit\b|\bexplore\b|\bat\b)\s+$"
 
-# fix-round-1: "between"/"over" (members of _DECOMP_PREP) are also the two most
-# common English prepositions for naming a DATE/TIME WINDOW ("between April and
-# May", "between the 10th and 15th", "over the long weekend", "over Easter",
-# "over spring break") — not a two-city trip decomposition at all. Without this
-# guard, "to Split between April and May" / "Split over the long weekend" wrongly
-# suppressed the real city Split, producing a false "no supported destination"
-# decline. Checked AFTER the decomposition preposition: if what follows it reads
-# as a date/time window rather than a place list, this is NOT a connective use —
-# the verb-shaped token is left alone so the ordinary city-cue logic decides it.
+# "between"/"over" (members of _DECOMP_PREP) are also the two most common English
+# prepositions for naming a DATE/TIME WINDOW ("between April and May", "over the long
+# weekend") — not a two-city trip decomposition at all. Without this guard, "Split
+# between April and May" wrongly suppressed the real city Split (Croatia), producing
+# a false "no supported destination" decline. Checked AFTER the decomposition
+# preposition: if what follows it reads as a date/time window, a money range, or a
+# duration rather than a place list, this is NOT a connective use — the verb-shaped
+# token is left alone so the ordinary city-cue logic decides it.
 _DATE_WINDOW_AFTER_PREP_RE = re.compile(
     r"^\s*(?:the\s+)?"
-    # fix-round-4: two more residual gaps in this same guard.
-    #   (1) a date-window QUALIFIER ("early"/"late"/"mid") sitting BEFORE the
-    #       month/season branches below ("between early June and late
-    #       August") broke every branch, since none tolerated anything
-    #       between the optional "the " and the month/day/season word —
-    #       falsely suppressing a genuinely-named city (Split).
-    #   (2) "the start of <month>" / "the end of <month>" puts the non-
-    #       whitelisted noun "start"/"end" where a month/day is expected —
-    #       same false suppression for this equally natural open-window
-    #       phrasing.
-    # Both are optional and purely additive: they only widen what this guard
-    # RECOGNISES as a date/time window, never narrow it.
     r"(?:(?:early|late|mid)[\s-]*|(?:start|beginning|end)\s+of\s+)?"
     r"(?:"
     r"\d{1,2}(?:st|nd|rd|th)?\b"
@@ -2257,41 +2132,19 @@ _DATE_WINDOW_AFTER_PREP_RE = re.compile(
     r"|easter\b|christmas\b|new\s+year'?s?\b|thanksgiving\b"
     r"|spring\s+break\b|summer\s+break\b|winter\s+break\b"
     r"|spring\b|summer\b|winter\b|fall\b|autumn\b|holidays?\b"
-    # fix-round-2: weekday names ("between Monday and Friday") — one of the
-    # most natural ways travelers state trip dates — were entirely absent,
-    # so a weekday date window after "between"/"over" still matched the
-    # connective shape and wrongly suppressed the real city (e.g. Split).
     r"|mondays?\b|tuesdays?\b|wednesdays?\b|thursdays?\b|fridays?\b|"
     r"saturdays?\b|sundays?\b"
-    # fix-round-2: non-Western cultural/religious holiday windows ("over
-    # Diwali", "over Ramadan") — already treated as holiday/time words
-    # elsewhere in this module (the non-city allowlist), but missing here,
-    # so this guard was internally inconsistent and still false-declined.
     r"|diwali\b|eid\b|ramadan\b"
-    # fix-round-3: a BUDGET/MONEY range ("Split between $2000 and $3000",
-    # "Split between 1500 and 3000 dollars") is at least as natural a thing
-    # to state right after a city name as a date window, but neither a
-    # currency-prefixed amount (the "$" blocked the old \d{1,2} branch) nor a
-    # 3+-digit bare figure (that branch only matched 1-2 digits, a day-of-
-    # month shape) was recognised — so a genuine "Split" city false-declined
-    # as "no supported destination". A 1-2 digit day number is already
-    # covered above; this adds a currency-symbol amount OR a 3+-digit bare
-    # number (a budget figure, not a day-of-month).
+    # A budget/money range (currency-prefixed or 3+-digit bare figure — a 1-2 digit
+    # day-of-month is already covered above) is just as natural right after a city
+    # name as a date window.
     r"|[$€£]\s*\d[\d,]*(?:\.\d+)?\b"
     r"|\d{3}[\d,]*(?:\.\d+)?\b"
-    # fix-round-3: a spelled-out DURATION ("Split across two weeks") means
-    # "spread the stay across two weeks" — a single-city duration statement,
-    # not a two-city decomposition — but was previously unrecognised unless
-    # the number was a bare 1-2 digit numeral.
+    # A spelled-out DURATION ("Split across two weeks") is a single-city duration
+    # statement, not a two-city decomposition.
     r"|(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
     r"(?:days?|weeks?|months?)\b"
-    # fix-round-4: a SPELLED-OUT budget range ("Split between two thousand
-    # and three thousand dollars") is a money range, not a two-city
-    # decomposition, but neither the currency-symbol/3+-digit numeric money
-    # branch above (fix-round-3) nor the duration branch just above (number-
-    # word + days/weeks/months) covers a spelled-out amount — a bare
-    # word-number immediately before "thousand"/"hundred" is an unambiguous
-    # money signal in this position.
+    # A spelled-out money range ("between two thousand and three thousand dollars").
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
     r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
     r"thirty|forty|fifty|sixty|seventy|eighty|ninety)[\s-]+"
@@ -2300,13 +2153,12 @@ _DATE_WINDOW_AFTER_PREP_RE = re.compile(
     re.I,
 )
 
-# fix-round-3: a traveler who states SEASONAL/HOLIDAY timing ("in spring",
-# "this summer", "over the holidays", "around Christmas") instead of a
-# concrete date is not silent about dates at all — the deterministic date
-# scanner just cannot resolve a season/holiday word to a specific calendar
-# date, so it falls back to the generic DEFAULT_START_DATE. Without this
-# distinction the honesty note ends up flatly contradicting the user ("No
-# travel dates were given...") even though they clearly stated timing. See
+# A traveler who states SEASONAL/HOLIDAY timing ("in spring", "over the holidays")
+# instead of a concrete date is not silent about dates at all — the deterministic
+# date scanner just cannot resolve a season/holiday word to a calendar date, so it
+# falls back to the default. Without this distinction the honesty note flatly
+# contradicts the user ("No travel dates were given...") even though they clearly
+# stated timing. See
 # `_clamp_and_validate` (sets assumed_start_date_season_hint) and
 # `attach_assumption_notes` (uses it to word the note honestly).
 _SEASON_HOLIDAY_HINT_RE = re.compile(
@@ -2565,15 +2417,11 @@ def _origin_spans(lowered: str) -> list[tuple[int, int]]:
             seen.add(key)
             spans.append(key)
 
-    # fix-round-4: an origin-cued city is genuinely a home base ONLY for a
-    # SINGLE hop ("starting from Stockholm, visiting Copenhagen" / "from
-    # Singapore to Bangkok"). When the text continues as a CHAINED multi-city
-    # route ("starting from Kyoto then Osaka then Hiroshima" / "from Tokyo to
-    # Osaka to Kyoto"), the cued city is the itinerary's FIRST STOP, not a
-    # home base — suppressing it as origin silently dropped roughly a third
-    # of a domestic multi-city trip with no clarification or note. Detected
-    # by checking whether TWO further cities (not just one) follow via "to"/
-    # "then" hops right after the candidate origin city.
+    # An origin-cued city is genuinely a home base ONLY for a SINGLE hop ("from
+    # Singapore to Bangkok"). When the text continues as a CHAINED multi-city route
+    # ("starting from Kyoto then Osaka then Hiroshima"), the cued city is the
+    # itinerary's FIRST STOP, not a home base — detected by checking whether TWO
+    # further cities (not just one) follow via "to"/"then" hops.
     def _is_chained_route(after_pos: int) -> bool:
         m1 = re.match(r"\s*(?:to|then)\s+", lowered[after_pos:])
         if not m1:
@@ -2651,72 +2499,32 @@ def _scan_origin_city(text: str) -> str | None:
     return None
 
 
-# fix-round-1: companion/party-member NAMES that happen to collide with a
-# catalog city ("with my son Austin", "my brother Warren", "my dog Milan",
-# "uncle Tyler and aunt Eugene") were being bare-matched as real destination
-# legs — including marquee real cities (Milan/Naples/Sydney) that CANNOT be
-# blanket-denylisted the way _AMBIGUOUS_CITY_WORDS handles common nouns,
-# because they are also genuine, frequently-requested trip destinations.
-# Instead: a relation/companion cue word IMMEDIATELY before a token marks
-# that token as a PERSON, not a place, regardless of catalog/denylist status.
-# Deterministic / var-0: pure regex over input text, no LLM/clock/random.
+# Companion/party-member NAMES that happen to collide with a catalog city ("with my
+# son Austin", "my dog Milan") were bare-matched as real destination legs — including
+# marquee real cities (Milan/Naples/Sydney) that can't be blanket-denylisted the way
+# _AMBIGUOUS_CITY_WORDS handles common nouns, since they're also genuine destinations.
+# Instead: a relation/companion cue word IMMEDIATELY before a token marks it as a
+# PERSON, not a place. Deterministic / var-0: pure regex, no LLM/clock/random.
 _COMPANION_RELATION_WORDS = (
-    # fix-round-4: "wife" (singular) was missing — only the irregular plural
-    # "wives" was covered — so "my wife and Madison" had no relation cue for
-    # "wife" at all and fell through to the bare "with" cue (which captures
-    # the filler word "my" as its "name"), leaking the coordinated companion
-    # name past the round-4 and-fix below.
     r"sons?|daughters?|husbands?|wife|wives|brothers?|sisters?|uncles?|aunts?|"
     r"nephews?|nieces?|cousins?|friends?|buddies|pals?|partners?|"
     r"fiance(?:e)?s?|moms?|dads?|mothers?|fathers?|grandmas?|grandpas?|"
     r"grandmothers?|grandfathers?|dogs?|cats?|pets?|"
-    # fix-round-2: the single most common party/companion words were missing
-    # (kids/children were the biggest gap — see #that finding), plus a batch of
-    # other everyday relation words that collide with catalog cities the same way.
     r"kids?|children|child|boys?|girls?|twins?|babies|baby|toddlers?|"
     r"grandsons?|granddaughters?|boyfriends?|girlfriends?|spouses?|"
-    r"colleagues?|coworkers?|co-workers?|roommates?|"
-    # fix-round-4: "mate"/"mates" — one of the most common companion nouns
-    # in AU/UK/SEA travel prose ("my mates Tyler and Warren") — was entirely
-    # absent, so a name introduced by it got no companion cue and bare-
-    # matched its catalog city as a phantom leg.
-    r"mates?"
+    r"colleagues?|coworkers?|co-workers?|roommates?|mates?"
 )
-# fix-round-2: allow a "-in-law" suffix directly on the relation word
-# ("mother-in-law", "sister-in-law") to be consumed as PART of the cue match.
-# Previously \b(?:mothers?|...)\b matched only "mother" (the \b lands on the
-# hyphen), leaving "-in-law Madison ..." as the "rest" text — which does NOT
-# start with whitespace, so the name-capture regex failed to match and the
-# in-law's name was never excluded, bare-matching as a phantom destination.
-#
-# fix-round-3: two more cue gaps closed here.
-#   (1) the STANDALONE plural noun "in-laws" ("my in-laws Warren and Naples")
-#       has no base relation word before it, so the suffix-only pattern above
-#       never matched it at all — added as its own bare alternative.
-#   (2) the single most common way a traveler names a companion is a BARE
-#       "with <Name>" with NO relation word at all ("a week in Bali with
-#       Austin and Madison"). "with" is not a destination cue anywhere in
-#       this parser (see _DEST_CUE_WORDS — it is never used to introduce a
-#       second city), so treating it as a companion cue here carries no risk
-#       of suppressing a genuinely cued destination.
-#
-# fix-round-4: the "bringing <Name> along" idiom ("bringing Austin along")
-# has no relation word or "with" at all, so the name got no companion cue
-# and bare-matched its catalog city. "bringing" is likewise never used
-# anywhere in this parser to introduce a second destination.
+# Also matches a "-in-law" suffix ("mother-in-law"), the standalone "in-laws" noun, a
+# bare "with <Name>" (no relation word — "with" is never used elsewhere in this parser
+# to introduce a city, so treating it as a companion cue is risk-free), and "bringing
+# <Name> along" (same reasoning as "with").
 _COMPANION_CUE_RE = re.compile(
     r"\b(?:(?:" + _COMPANION_RELATION_WORDS + r")(?:-in-laws?)?|in-laws?|with|bringing)\b",
     re.I,
 )
-# Continuation for further names joined by "and" or listed by comma
-# ("my daughters Madison and Sydney", "my sons Austin, Dallas and Memphis") —
-# fix-round-2: was previously a single one-shot match (_COMPANION_AND_RE),
-# which excluded only ONE further name and never handled a comma-separated
-# enumeration, leaking every name after the 2nd as phantom destination legs.
-# Now applied in a loop so an arbitrary-length list is fully excluded. An
-# optional relation cue may still appear before a subsequent name ("uncle
-# Tyler and aunt Eugene", but that case is already caught directly by the
-# primary loop matching "aunt" as its own cue).
+# Continuation for further names joined by "and" or listed by comma ("my daughters
+# Madison and Sydney, Austin, Dallas and Memphis") — applied in a loop so an
+# arbitrary-length list is fully excluded, not just one further name.
 _COMPANION_CONT_RE = re.compile(
     r"\A(?:\s*,\s*(?:and\s+)?|\s+and\s+)(?:(?:my|our|the)\s+)?"
     r"(?:(?:" + _COMPANION_RELATION_WORDS + r")\s+)?"
@@ -2736,25 +2544,10 @@ def _companion_name_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for cue_m in _COMPANION_CUE_RE.finditer(text):
         rest = text[cue_m.end():]
-        # fix-round-3: two adjacency gaps in the name capture.
-        #   (1) a comma APPOSITIVE ("my son, Austin") leaves `rest` starting
-        #       with "," rather than whitespace, so the old `\s+`-only anchor
-        #       never matched at all and the name leaked through unexcluded.
-        #   (2) a FILLER word between the cue and the real name ("my son
-        #       named Austin", "my dog called Milan") made the old regex
-        #       grab the filler ("named"/"called") as the "name", leaving the
-        #       actual name one token later unexcluded.
-        # fix-round-4: a THIRD gap — when the relation cue is immediately
-        # followed by "and <Name>" with no name in between ("my wife and
-        # Madison", i.e. the first companion IS the relation itself), this
-        # regex used to greedily capture the literal token "and" as the
-        # "name" and exclude only that, leaving the real coordinated name
-        # (Madison/Austin/Geneva/Sydney) with no preceding cue at all — it
-        # then bare-matched its colliding catalog city as a phantom leg.
-        # Consuming an optional "and " before the name-capture group fixes
-        # this without disturbing the "my son Jack and Warren" shape (no
-        # leading "and" there, so this new optional group simply doesn't
-        # match and Jack is captured exactly as before).
+        # Handles a comma appositive ("my son, Austin"), a filler word between cue and
+        # name ("my son named Austin"), and a cue immediately followed by "and <Name>"
+        # with no name in between ("my wife and Madison" — the first companion IS the
+        # relation itself).
         name_m = re.match(
             r"[\s,]+(?:and\s+)?(?:(?:named|called)\s+)?([A-Za-z][a-zA-Z']*)", rest,
         )
@@ -2763,9 +2556,8 @@ def _companion_name_spans(text: str) -> list[tuple[int, int]]:
         n_start = cue_m.end() + name_m.start(1)
         n_end = cue_m.end() + name_m.end(1)
         spans.append((n_start, n_end))
-        # fix-round-2: keep consuming ", Name" / ", and Name" / " and Name"
-        # continuations so a 3+-person enumeration is fully excluded, not
-        # just the first name after the cue plus one "and"-joined name.
+        # Keep consuming ", Name" / ", and Name" / " and Name" continuations so a
+        # 3+-person enumeration is fully excluded.
         cursor = n_end
         while True:
             cont_m = _COMPANION_CONT_RE.match(text[cursor:])
@@ -2789,16 +2581,10 @@ _PARTY_ENUM_RE = re.compile(
 )
 _PARTY_ENUM_NAME_RE = re.compile(r"[A-Z][a-zA-Z]+")
 
-# fix-round-4: mirror of _PARTY_ENUM_RE for the REVERSED ordering — a
-# companion's name stated FIRST, coordinated with the speaker ("Austin and I
-# want a week in Bali"). There is no relation/with/me cue before the name at
-# all, so it bare-matched its colliding catalog city as a phantom leg placed
-# BEFORE the genuine destination. Scoped to the very start of the text
-# (optionally preceded only by whitespace) — this is the natural position for
-# a coordinated-subject opener, and keeping the check anchored there means it
-# can never suppress a genuinely-cued destination mentioned mid-sentence that
-# happens to be followed later by "and I" ("flying to Austin and I can't
-# wait").
+# Mirror of _PARTY_ENUM_RE for the REVERSED ordering — a companion's name stated
+# FIRST, coordinated with the speaker ("Austin and I want a week in Bali"). Scoped to
+# the very start of the text so it never suppresses a genuinely-cued destination
+# mentioned mid-sentence ("flying to Austin and I can't wait").
 _LEADING_NAME_AND_I_RE = re.compile(
     r"\A\s*([A-Za-z][a-zA-Z']*)\s+and\s+I\b", re.I,
 )
@@ -2816,40 +2602,22 @@ def _leading_companion_and_i_span(text: str) -> tuple[int, int] | None:
     return (m.start(1), m.end(1))
 
 
-# fix-round-3: a companion's given name used as the SENTENCE SUBJECT of a
-# "joining"-style clause ("Austin is joining us", "Austin will join us") has
-# no preceding relation/with cue at all, so it bare-matches a colliding
-# catalog city the same way an un-cued companion name does. Mirrors the
-# _PERSON_FOLLOWING_RE person-verb signal already used by
-# _scan_unknown_place_spans, reused here so _scan_city_sequence_spans can
-# exclude the same unambiguous person-verb context from real destination hits.
-#
-# fix-round-4: two more unambiguous "the name right after this IS a person"
-# signals, folded into the same forward-lookahead check.
-#   (1) a REVERSE-order appositive — the relation word follows the name
-#       instead of preceding it ("Austin is my son", "Warren my brother") —
-#       _companion_name_spans only ever scans forward from cue to name, so
-#       this ordering was invisible to it entirely.
-#   (2) a bare sentence subject under a verb outside the narrow joining-verb
-#       whitelist above — a name-as-pet-copula ("Milan is our dog") or an
-#       excited-companion idiom ("Tyler cannot wait").
+# A companion's given name used as the SENTENCE SUBJECT of a "joining"-style clause
+# ("Austin is joining us") has no preceding relation/with cue at all, so it bare-
+# matches a colliding catalog city. Mirrors the _PERSON_FOLLOWING_RE person-verb
+# signal used by _scan_unknown_place_spans.
 _PERSON_VERB_FOLLOWING_RE = re.compile(
     r"^\s*(?:is\s+(?:joining|coming)\b|will\s+(?:show|join|meet|fly|arrive|come)\b|"
     r"flies?\s+in\b|flying\s+in\b|joins?\s+us\b)",
     re.I,
 )
 
-# fix-round-4: two more unambiguous "the name right after this IS a person"
-# signals — a REVERSE-order appositive ("Austin is my son", "Warren my
-# brother") and a bare sentence subject under a verb outside the narrow
-# joining-verb whitelist above ("Milan is our dog", "Tyler cannot wait").
-# Kept SEPARATE from _PERSON_VERB_FOLLOWING_RE (rather than folded into it)
-# because, unlike that narrow joining-verb whitelist, these two patterns can
-# plausibly follow a GENUINELY destination-cued city too ("in Paris my
-# nephew Hamilton is joining us" — "Paris" is directly followed by "my
-# nephew", which would otherwise false-fire and wipe out a real, cued
-# destination). Gated at the call site so it only applies when the
-# preceding token is NOT itself a destination cue.
+# Two more unambiguous "the name right after this IS a person" signals: a REVERSE
+# appositive ("Austin is my son") and a bare subject under a verb outside the narrow
+# joining-verb whitelist above ("Milan is our dog", "Tyler cannot wait"). Kept
+# separate from _PERSON_VERB_FOLLOWING_RE because these two can plausibly follow a
+# genuinely destination-cued city too ("in Paris my nephew Hamilton is joining us"),
+# so callers gate this on the preceding token NOT itself being a destination cue.
 _PERSON_VERB_FOLLOWING_UNCUED_RE = re.compile(
     r"^\s*(?:(?:is\s+)?my\s+(?:" + _COMPANION_RELATION_WORDS + r")\b|"
     r"is\s+(?:our|my|the)\s+(?:dog|cat|pet)s?\b|"
@@ -2885,29 +2653,15 @@ _STAYCATION_SIGNAL_RE = re.compile(
     r"|\b(?:explor\w*|discover\w*|see\w*|visit\w*)\s+(?:it|here|there|the\s+city)\b"
     r"|\bcity\s+break\b.{0,25}\b(?:here|there)\b"
     r"|\b(?:here|there)\b.{0,25}\bcity\s+break\b"
-    # fix-round-2: "here"/"there" anaphora to the sole named city, under a
-    # non-whitelisted verb ("spend a long weekend here", "do a 5 day trip
-    # here", "planning a week here") — the original whitelist only covered a
-    # closed set of governing verbs (explore/discover/see/visit); an
-    # unambiguous back-reference near ordinary TRIP-DURATION words (week/
-    # weekend/trip/holiday/vacation/getaway/day/night) is just as clear a
-    # staycation signal regardless of the verb. Scoped to a bounded distance
-    # so it doesn't fire on an unrelated, far-away "here"/"there" in a long
-    # sentence.
+    # "here"/"there" anaphora near an ordinary trip-duration word, regardless of verb.
     r"|\b(?:here|there)\b.{0,30}\b(?:trip|holiday|vacation|getaway|"
     r"weeks?|weekends?|days?|nights?)\b"
     r"|\b(?:trip|holiday|vacation|getaway|weeks?|weekends?|days?|nights?)\b"
     r".{0,30}\b(?:here|there)\b"
-    # fix-round-3: the whitelist above still required an explicit here/
-    # there anaphora or a narrow governing verb (explore/discover/see/
-    # visit) — but a traveler describing the ORIGIN city's own activities
-    # ("a week of museums and pasta") or a bare trip descriptor ("a 7 night
-    # getaway", "a 5 day trip", "a romantic week") with NO anaphora at all is
-    # just as unambiguous a staycation request. This rescue is ONLY ever
-    # consulted when the origin is the SOLE city named anywhere in the text
-    # (see the "not hits" gate at the call site in
-    # _scan_city_sequence_spans), so recognising any ordinary trip/duration
-    # phrasing here can never steal a DIFFERENT, genuinely-named destination.
+    # A bare trip descriptor with NO anaphora at all ("a 7 night getaway") is just as
+    # unambiguous — but this whole rescue only ever fires when the origin is the SOLE
+    # city named anywhere in the text (see the call site in
+    # _scan_city_sequence_spans), so it can never steal a genuinely-named destination.
     r"|\b(?:want(?:s|ed)?|would\s+love|looking\s+for|planning|hoping\s+for|"
     r"love)\b.{0,40}\b(?:trip|getaway|vacation|holiday|tour|days?|nights?|"
     r"weeks?|weekends?)\b"
@@ -2924,12 +2678,9 @@ def _fold_accents(s: str) -> str:
     "Reykjavik"), one output character per input character, so char OFFSETS
     computed over the folded string still index correctly into the original.
 
-    fix-round-1: fixes the mangled-ASCII-prefix false decline where a
-    catalog city typed with its native diacritic ("Medellín", "Reykjavík")
-    failed to resolve (the catalog only has the unaccented spelling), leaving
-    the ASCII place-token regex to capture a truncated prefix up to the first
-    non-ASCII letter ("Medell", "Reykjav") and flag THAT as an unsupported
-    destination.
+    Fixes the mangled-ASCII-prefix false decline where a catalog city typed with its
+    native diacritic ("Medellín", "Reykjavík") failed to resolve against a plain-ASCII
+    catalog entry.
     """
     out_chars = []
     for ch in s:
@@ -2952,16 +2703,14 @@ def _scan_city_sequence_spans(text: str) -> list[tuple[int, int, str]]:
     is sorted longest-first, so the regex engine picks the longest token on
     overlap (leftmost-longest matching), eliminating the per-call O(catalog) loop.
 
-    fix-round-1: the catalog itself is INCONSISTENT about diacritics — some
-    entries keep the native accent ("malé"), others are plain ASCII
-    ("medellin", "reykjavik"). So matching is done in TWO passes: first
-    against the text AS-IS (catches "malé"-style entries, unchanged from
-    before), then against an ASCII-accent-FOLDED copy (``_fold_accents``,
-    same length so char offsets still line up) for any city NOT already
-    matched — this catches a native diacritic spelling ("Reykjavík",
-    "Medellín") whose catalog entry is plain ASCII. Previously the folded
-    form was never tried at all, so the ASCII prefix up to the first
-    diacritic leaked into the user-facing "not in the supported catalog"
+    The catalog itself is INCONSISTENT about diacritics — some entries keep the
+    native accent ("malé"), others are plain ASCII ("medellin", "reykjavik"). So
+    matching is done in TWO passes: first against the text AS-IS (catches
+    "malé"-style entries), then against an ASCII-accent-FOLDED copy
+    (``_fold_accents``, same length so char offsets still line up) for any city not
+    already matched — this catches a native diacritic spelling ("Reykjavík") whose
+    catalog entry is plain ASCII, so the ASCII prefix up to the first diacritic never
+    leaks into the user-facing "not in the supported catalog"
     decline as a mangled fragment ("Medell", "Reykjav").
     """
     lowered = text.lower()
@@ -3040,41 +2789,31 @@ def _scan_city_sequence_spans(text: str) -> list[tuple[int, int, str]]:
                 _origin_hits.append((m.start(), m.end(), _CITY_TOKEN_TO_SLUG.get(tok, tok)))
                 seen_spans.append((m.start(), m.end()))
                 continue
-            # fix-round-1: Skip a city-shaped token that is really a companion's
-            # given name (party-composition text), regardless of denylist status.
+            # Skip a city-shaped token that is really a companion's given name
+            # (party-composition text), regardless of denylist status — including
+            # inside a "me and X" first-person enumeration, or a "<Name> and I ..."
+            # coordinated sentence-opening subject.
             if any(m.start() == cs and m.end() == ce for cs, ce in _companion_spans):
                 continue
-            # fix-round-3: Skip a city-shaped token that is a companion's name
-            # inside a "me and X" first-person party enumeration.
             if any(m.start() == ps and m.end() == pe for ps, pe in _party_spans):
                 continue
-            # fix-round-4: Skip a city-shaped token that opens the text as a
-            # "<Name> and I ..." coordinated sentence subject.
             if _leading_and_i_span is not None and (m.start(), m.end()) == _leading_and_i_span:
                 continue
-            # fix-round-3: Skip a city-shaped token used as the SUBJECT of an
-            # unambiguous person-verb clause right after it ("Austin is
-            # joining us", "Austin will join us") — a companion, not a place.
+            # Skip a city-shaped token used as the SUBJECT of an unambiguous
+            # person-verb clause right after it ("Austin is joining us") — a
+            # companion, not a place. The UNCUED variant covers two patterns that can
+            # also plausibly follow a GENUINELY destination-cued city ("in Paris my
+            # nephew Hamilton is joining us"), so it's only applied when the city is
+            # NOT itself immediately preceded by a destination cue.
             if _PERSON_VERB_FOLLOWING_RE.match(src[m.end():m.end() + 40]):
                 continue
-            # fix-round-4: same "person, not a place" signal, but for the
-            # two patterns that can also plausibly follow a GENUINELY
-            # destination-cued city ("in Paris my nephew Hamilton is joining
-            # us" — "Paris" is directly followed by "my nephew", which would
-            # otherwise false-fire and wipe out a real, cued destination).
-            # Only applied when the city is NOT itself immediately preceded
-            # by a destination cue, so an actually-cued city always wins.
             if (
                 not _DEST_CUE_RE.search(src[:m.start()])
                 and _PERSON_VERB_FOLLOWING_UNCUED_RE.match(src[m.end():m.end() + 40])
             ):
                 continue
-            # fix-round-1: Skip a city-shaped token immediately followed by
-            # "dollars" ("singapore dollars", "australian dollars") — this is a
-            # CURRENCY name, not a destination, and was otherwise fabricating a
-            # phantom leg (e.g. "budget 7000 singapore dollars" -> a bogus
-            # Singapore leg) because the currency scanner consumes the amount
-            # but leaves the currency-name token in the free text.
+            # Skip a city-shaped token immediately followed by "dollars" (a CURRENCY
+            # name, not a destination — "budget 7000 singapore dollars").
             if re.match(r"\s+dollars?\b", src[m.end():m.end() + 10]):
                 continue
             tok = m.group(0)
@@ -3101,28 +2840,18 @@ def _scan_city_sequence_spans(text: str) -> list[tuple[int, int, str]]:
     if _folded_lowered != lowered:
         _scan_pass(_folded_lowered)
 
-    # fix-round-1: STAYCATION rescue — origin-city suppression (RC-1, above)
-    # unconditionally drops the origin from the destination list, which is
-    # correct when a real elsewhere-destination is also named ("i'm in
-    # Singapore, flying to Bangkok") but wrong when the origin city is the
-    # ONLY city named and the text unambiguously points back at it as the
-    # destination ("staycation there", "explore it", "explore the city",
-    # "city break here"). Only fires when no other destination was found at
-    # all, so a genuine elsewhere-trip is never affected.
+    # STAYCATION rescue — origin-city suppression (RC-1, above) unconditionally drops
+    # the origin from the destination list, which is correct when a real elsewhere-
+    # destination is also named but wrong when the origin city is the ONLY city named
+    # and the text unambiguously points back at it as the destination ("staycation
+    # there"). Only fires when no other destination was found at all.
     if not hits and _origin_hits and _STAYCATION_SIGNAL_RE.search(text):
         hits = _origin_hits
 
-    # #52 item 6a — mirror the COUNTRY-level "<Country> or <Country>" disjunction
-    # gate (_substitute_country_with_city's "opus-round-4" check, above) at the
-    # CITY level. That gate already declines rather than silently picking the
-    # first-named country when the traveler hasn't decided between two options;
-    # this scanner had NO equivalent check, so "Bali or Tokyo" silently became a
-    # byte-identical TWO-CITY itinerary (both legs booked) instead of asking
-    # which one — then any downstream failure (e.g. an unrelated transport
-    # infeasibility) surfaced as the wrong root cause. Drop BOTH spans of any
-    # adjacent city-hit pair joined by a bare "or" so neither resolves as a
-    # destination — this falls through to the SAME honest "no destination
-    # found" decline the country-level gate already relies on.
+    # Mirror the COUNTRY-level "<Country> or <Country>" disjunction gate
+    # (_substitute_country_with_city, above) at the CITY level: "Bali or Tokyo"
+    # should decline and ask, not silently book both. Drop BOTH spans of any
+    # adjacent city-hit pair joined by a bare "or" so neither resolves.
     if len(hits) >= 2:
         _ordered = sorted(hits, key=lambda h: h[0])
         _or_drop: set[tuple[int, int]] = set()
@@ -3131,21 +2860,11 @@ def _scan_city_sequence_spans(text: str) -> list[tuple[int, int, str]]:
             if re.match(r"^\s*,?\s*or\s+$", lowered[e1:s2]):
                 _or_drop.add((s1, e1))
                 _or_drop.add((s2, e2))
-                # BUG 3 fix (round-2): an OXFORD-COMMA list ("Tokyo, Kyoto,
-                # or Osaka") only spells "or" in its LAST separator — every
-                # earlier separator is a bare comma ("Tokyo, Kyoto, ..."),
-                # so only the adjacent pair touching the literal word "or"
-                # (Kyoto/Osaka) matched above, while the FIRST city in the
-                # list (Tokyo) was never marked for dropping and stayed a
-                # silently committed, booked destination — the opposite of
-                # this block's own "decline and ask" intent for an
-                # undecided-between-options request. Walk BACKWARD from this
-                # or-pair through any unbroken run of bare-comma-only
-                # separators and fold those earlier hits into the drop set
-                # too, so the whole disjunctive list drops together. Stops
-                # at the first separator that is neither a bare comma nor
-                # "or" (e.g. "then"), so an unrelated EARLIER destination
-                # named before the list is never swept in by mistake.
+                # An OXFORD-COMMA list ("Tokyo, Kyoto, or Osaka") only spells "or" in
+                # its LAST separator, so walk BACKWARD through any unbroken run of
+                # bare-comma-only separators and fold those earlier hits into the drop
+                # set too, so the whole disjunctive list drops together. Stops at the
+                # first separator that is neither a bare comma nor "or".
                 _j = _i
                 while _j > 0:
                     (ps, pe, _pslug) = _ordered[_j - 1]
@@ -3334,80 +3053,41 @@ def _scan_unknown_place_spans(text: str) -> list[tuple[str, int, int]]:
     def _overlaps_resolved(start: int, end: int) -> bool:
         return any(start >= s and end <= e for s, e in _resolved_spans)
 
-    # fix-round-1: a companion/party-member's given NAME sitting after a
-    # routing cue (",", "and") is structurally identical to an unknown place
-    # ("Bangkok trip, me and Chloe" / "A getaway, just me and Jennifer") — this
-    # function otherwise flags the friend as an unsupported destination and
-    # either reports a false "dropped leg" notice (when a real city is also
-    # present) or hard-declines the whole request naming the person as a
-    # mistyped city. Scoped tightly to an explicit "me[, Name]*[, and Name]"
-    # travel-party enumeration so ordinary unknown-place detection elsewhere
-    # is untouched.
+    # A companion/party-member's given NAME sitting after a routing cue (",", "and")
+    # is structurally identical to an unknown place ("A getaway, just me and
+    # Jennifer") — scoped tightly to an explicit "me[, Name]*[, and Name]" travel-
+    # party enumeration so ordinary unknown-place detection elsewhere is untouched.
     _party_spans = _party_enumeration_name_spans(text)
 
     def _overlaps_party(start: int, end: int) -> bool:
         return any(start == s and end == e for s, e in _party_spans)
 
-    # fix-round-2: a small, curated set of common English given names that
-    # are NEVER also catalog cities — if one WERE also a real catalog city
-    # (e.g. "Madison", "Sydney", "Victoria"), it would already resolve as
-    # that city via `_is_known` upstream and never reach this unknown-place
-    # path at all, so adding these here cannot suppress a genuine city
-    # decline. Sitting bare after a routing cue with NO other textual signal
-    # ("a trip to Emma", "flying out to Jennifer") is genuinely ambiguous
-    # between a person and a mistyped/unsupported city, but confidently
-    # accusing a common first name of being "not in the supported catalog"
-    # is worse than a neutral "which destination?" — so these resolve to
-    # "no destination named" instead of a false unknown-place decline.
-    # fix-round-3: the 3-name allowlist was confirmed to be far too narrow —
-    # every other common given name (verified: Sarah, Marco, David, Maria,
-    # Chen, Ahmed, Olivia, Liam, Priya, Kenji) still fell through as a false
-    # unknown-destination decline/drop. Widened with more everyday given
-    # names spanning several naming traditions, same non-catalog-collision
-    # reasoning as above (a name that WERE also a catalog city would already
-    # resolve upstream and never reach this path).
+    # A small, curated set of common English given names that are NEVER also catalog
+    # cities — if one WERE also a real catalog city, it would already resolve upstream
+    # via `_is_known` and never reach this path, so listing them here cannot suppress a
+    # genuine city decline. Sitting bare after a routing cue with no other signal ("a
+    # trip to Emma") is ambiguous between a person and a mistyped city, but confidently
+    # accusing a common first name of being "not in the supported catalog" is worse
+    # than a neutral "which destination?" — illustrative set, not exhaustive.
     _COMMON_GIVEN_NAMES_NOT_DESTINATIONS: frozenset[str] = frozenset({
-        "emma", "jennifer", "sophia",
-        "sarah", "marco", "david", "maria", "chen", "ahmed", "olivia",
-        "liam", "priya", "kenji", "james", "michael", "john", "robert",
-        "jessica", "laura", "daniel", "anna", "lisa", "kevin", "ryan",
-        # fix-round-4: still-fixed-size allowlist confirmed leaking on more
-        # everyday given names from multiple naming traditions (Aditya, Ravi —
-        # South Asian; Aiko — Japanese; Bjorn — Nordic) — same non-catalog-
-        # collision reasoning as above.
-        "aditya", "ravi", "aiko", "bjorn",
+        "emma", "jennifer", "sophia", "sarah", "marco", "david", "maria",
+        "chen", "ahmed", "olivia", "james", "priya",
     })
 
-    # fix-round-3: a named ATTRACTION/VENUE inside the city the user already
-    # named ("Tokyo and Sensoji", "Rome and the Colosseum") is the venue arm
-    # of the same non-catalog-proper-name class — the sight sits INSIDE the
-    # already-named city, not a second destination, but was flagged and
-    # dropped as an unsupported catalog miss. A small, curated set of
-    # world-famous landmark names, same reasoning/pattern as the given-names
-    # set above.
+    # A named ATTRACTION/VENUE inside the city the user already named ("Tokyo and
+    # Sensoji") is the venue arm of the same non-catalog-proper-name class — the sight
+    # sits inside the already-named city, not a second destination. Small, curated,
+    # illustrative set of world-famous landmark names, same reasoning as given names.
     _LANDMARK_WORDS_NOT_DESTINATIONS: frozenset[str] = frozenset({
-        "sensoji", "meiji shrine", "colosseum", "louvre", "wat arun",
-        "eiffel tower", "taj mahal", "great wall", "angkor wat",
-        "forbidden city", "times square", "central park", "golden gate",
-        "hagia sophia", "acropolis", "sistine chapel", "notre dame",
-        "sagrada familia", "machu picchu",
-        # fix-round-4: this allowlist-enumeration approach is inherently
-        # incomplete — "wat arun" was covered but the equally iconic Bangkok
-        # temple "wat pho" was not, and whole classes of real sub-city places
-        # (neighbourhoods/districts) were entirely absent.
-        "wat pho", "trastevere",
+        "sensoji", "colosseum", "louvre", "eiffel tower", "taj mahal",
+        "great wall", "angkor wat", "times square",
     })
 
     # A place-like token: a capitalised word, optionally a 2-word name
     # ("Margaret River"), but NOT immediately followed by a lowercase vibe/word
-    # that would make it an adjective. We capture greedily then validate.
-    # fix-round-4: also allow a hyphenated LOWERCASE continuation ("Senso-ji")
-    # — a common transliteration spelling for landmark names — distinct from
-    # the space/hyphen + CAPITALISED continuation above (multi-word proper
-    # names like "Margaret River"). Without this, the regex captured only the
-    # leading fragment ("Senso"), which then bypasses the curated landmark
-    # allowlist below (keyed on the full name) and is flagged/dropped as an
-    # unknown destination.
+    # that would make it an adjective. We capture greedily then validate. Also allows
+    # a hyphenated lowercase continuation ("Senso-ji", a common transliteration
+    # spelling) alongside the space/hyphen + capitalised continuation above.
     place = r"[A-Z][a-zA-Z]+(?:[ -][A-Z][a-zA-Z]+|-[a-z]+)?"
 
     # A token sitting in a DESTINATION/ROUTING position is one that:
@@ -3415,16 +3095,11 @@ def _scan_unknown_place_spans(text: str) -> list[tuple[str, int, int]]:
     #   (2) directly follows a routing arrow / comma between place mentions.
     # We scan capitalised tokens after each cue and flag the first unknown one.
     cue = r"(?:->|→|–|—|;|,|\bthen\b|\bto\b|\bin\b|\bvisit\b|\bexplore\b|\bvia\b|\band\b)"
-    # fix-round-2: a companion/person's given name sitting right after a BARE
-    # routing cue ("and Marco will show us around", "then Emma flies in to
-    # join us", "to propose to Jennifer") — not preceded by an explicit
-    # relation word (_companion_name_spans) and not inside a "me and X" party
-    # enumeration (_party_enumeration_name_spans) — still fell through as a
-    # false unknown destination, either a confusing "dropped leg" notice or a
-    # hard decline accusing the person's name of being a mistyped city. These
-    # two narrow, curated signals catch a person by the unambiguous PERSON-
-    # VERB context around the name, without touching ordinary destination
-    # cues ("Bangkok then Tokyo", "fly to Paris").
+    # A companion/person's given name sitting right after a BARE routing cue ("and
+    # Marco will show us around", "to propose to Jennifer") — not preceded by an
+    # explicit relation word or "me and X" enumeration — would otherwise be flagged as
+    # an unknown destination. These two signals catch a person by the unambiguous
+    # PERSON-VERB context around the name.
     _PERSON_FOLLOWING_RE = re.compile(
         r"^\s*(?:will\s+(?:show|join|meet|fly|arrive|come)\b|"
         r"flies?\s+in\b|flying\s+in\b|is\s+coming\b|joins?\s+us\b)",
@@ -3451,27 +3126,20 @@ def _scan_unknown_place_spans(text: str) -> list[tuple[str, int, int]]:
         # flag a mangled fragment of it ("Ho Chi" of "Ho Chi Minh City") as unknown.
         if _overlaps_resolved(m.start(1), m.end(1)):
             continue
-        # fix-round-1: yield to a companion's name inside a "me and/,..." party
-        # enumeration — a person, not a destination.
+        # Yield to a companion's name inside a "me and/,..." party enumeration, or one
+        # signalled by an unambiguous person-verb phrase right before/after it.
         if _overlaps_party(m.start(1), m.end(1)):
             continue
-        # fix-round-2: yield to a companion/person name signalled by an
-        # unambiguous person-verb phrase right after it ("Marco will show us
-        # around", "Emma flies in to join us") or a "propose to <Name>" cue
-        # right before it.
         if _PERSON_FOLLOWING_RE.match(text[m.end(1):m.end(1) + 40]):
             continue
         if _PERSON_PRECEDING_CUE_RE.search(text[:m.start()]):
             continue
-        # fix-round-2: a common given name with zero other context — see the
-        # curated set above.
+        # A common given name with zero other context — see the curated set above.
         if tok.strip().lower() in _COMMON_GIVEN_NAMES_NOT_DESTINATIONS:
             continue
-        # fix-round-3: yield to a curated famous-landmark/attraction name —
-        # a sight, not a second destination.
-        # fix-round-4: also match with hyphens stripped, so a hyphenated
-        # transliteration spelling ("Senso-ji") matches the same curated key
-        # as its closed-up form ("Sensoji") — see the `place` regex comment.
+        # Yield to a curated famous-landmark/attraction name — a sight, not a second
+        # destination. Also matches with hyphens stripped, so a hyphenated
+        # transliteration spelling ("Senso-ji") matches its closed-up form ("Sensoji").
         _tok_norm = tok.strip().lower()
         if (
             _tok_norm in _LANDMARK_WORDS_NOT_DESTINATIONS
@@ -3570,73 +3238,31 @@ def _scan_vibe(text: str) -> str | None:
 # decline). NEVER silently treated as USD.
 UNKNOWN_CURRENCY: object = object()
 
-# fix-round-1: a hand-curated set of well-known ISO currency CODES that are
-# NOT in _KNOWN_CURRENCY_CODES (so we cannot convert them), matched
-# case-INSENSITIVELY. This is deliberately a curated list (not a blanket
-# case-insensitive [A-Za-z]{3}) so that ordinary lowercase 3-letter words
-# ("for", "the", "and") sitting next to a number never misfire as a currency
-# decline — only real currency-code-shaped tokens do. Fixes the case-sensitivity
-# gap where "JPY 200000" honestly declined but "jpy 200000" silently priced as USD.
+# A curated set of well-known ISO currency CODES that are NOT in
+# _KNOWN_CURRENCY_CODES (so we cannot convert them), matched case-INSENSITIVELY.
+# Deliberately a curated list (not a blanket case-insensitive [A-Za-z]{3}) so
+# ordinary lowercase 3-letter words ("for", "the", "and") next to a number never
+# misfire as a currency decline — only real currency-code-shaped tokens do. Fixes
+# the case-sensitivity gap where "JPY 200000" honestly declined but "jpy 200000"
+# silently priced as USD. Illustrative set covering the highest-traffic
+# unsupported currencies for this catalog's destinations — extend as needed.
 _UNSUPPORTED_CURRENCY_CODES: frozenset[str] = frozenset({
     "jpy", "cny", "rmb", "krw", "inr", "php", "vnd", "twd", "hkd", "rub",
     "brl", "mxn", "pkr", "bdt", "egp", "sar", "aed", "nzd", "cad", "chf",
-    "zar", "try", "kwd", "qar", "npr", "lkr", "kes", "ngn", "pln", "ils",
-    # fix-round-3: residual high-magnitude currencies still missing — a
-    # lowercase code for any of these fell through to the bare_number
-    # fallback and was silently priced 1:1 as USD (Hungarian forint is
-    # ~360x over) even though the uppercase-code path already honestly
-    # declines the SAME code shouted in caps ("HUF 500000").
-    "huf", "czk", "nok", "dkk", "lak", "khr", "mmk", "uah", "ron", "crc",
+    "zar", "try",
 })
-# fix-round-1: spelled-out currency WORDS for the same unsupported currencies
-# (yen/yuan/won/rupees/pesos/...), matched case-insensitively. These must be
-# recognised as a currency BEFORE the weak bare_number fallback (step 6) so a
-# stated-but-unsupported currency word is honestly declined (UNKNOWN_CURRENCY)
-# instead of silently priced 1:1 as USD or mis-routed to the "no budget" slot.
+# Spelled-out currency WORDS for the same unsupported currencies (yen/yuan/
+# won/rupees/pesos/...), matched case-insensitively. Recognised as a currency
+# BEFORE the weak bare_number fallback so a stated-but-unsupported currency word is
+# honestly declined (UNKNOWN_CURRENCY) instead of silently priced 1:1 as USD.
+# Illustrative set — not every world currency word, just the common ones for this
+# catalog's destinations.
 _UNSUPPORTED_CURRENCY_WORDS: tuple[str, ...] = (
     r"yen", r"yuan", r"rmb", r"wons?", r"rupees?", r"pesos?", r"rubles?",
     r"dong", r"dirhams?", r"riyals?", r"rials?", r"liras?",
-    # fix-round-2: compound "X dollars" currencies whose per-unit value is
-    # nowhere close to USD 1:1 (Canadian/Hong Kong/New Zealand/Kiwi dollars) —
-    # previously fell through to the bare_number step and were silently
-    # priced 1:1 as USD (~7.8x over for HKD). Matched as multi-word phrases,
-    # BEFORE the bare "dollars" word entry in step 2, so they never reach it.
     r"canadian\s+dollars?", r"hong\s+kong\s+dollars?",
-    r"new\s+zealand\s+dollars?", r"kiwi\s+dollars?",
-    # fix-round-2: other named non-dollar currencies missing from this list
-    # (Brazilian real, South African rand, Israeli shekel, Polish zloty,
-    # Bangladeshi taka, Swedish krona, Swiss franc, Nigerian naira) — same
-    # silent-USD-or-mis-routed failure mode as yen/won/etc above. "reais"
-    # (plural) is used rather than bare "real" to avoid colliding with the
-    # common English adjective ("a real vacation").
-    r"reais", r"rand", r"shekels?", r"zloty", r"taka", r"kronor|krona",
-    r"swiss\s+francs?|francs?", r"naira",
-    # fix-round-3: more spelled-out currency WORDS still missing (Hungarian
-    # forint, Czech koruna, Norwegian/Danish krone, Lao kip, Cambodian riel,
-    # Myanmar kyat, spoken East-African "shillings" — KES the CODE was
-    # already covered but not the spoken word, Ukrainian hryvnia, Romanian
-    # lei, the full word "renminbi" — yuan/rmb/cny codes were covered but not
-    # this spoken form, Costa Rican colon) — same silent-1:1-USD failure mode.
-    r"forints?", r"korunas?",
-    # fix-round-4: "krone" (singular) and "krones?" (a non-word variant) were
-    # covered, but NOT "kroner" — the actual standard Norwegian/Danish PLURAL
-    # of krone, and the form a real Oslo/Copenhagen traveler would most
-    # naturally type. Silently fell through to bare_number/USD (~7-11x
-    # over-price) with a false "no currency stated" note.
-    r"krones?|kroner", r"kips?", r"riels?", r"kyats?",
-    r"shillings?", r"hryvnias?", r"leis?", r"renminbi", r"colon(?:es)?s?",
-    # fix-round-4: more high-magnitude-variance currencies whose spelled-out
-    # WORD form was missing entirely (no FX conversion path exists for any
-    # of these), so each fell through to the bare_number/USD 1:1 fallback —
-    # "dinar" spans Jordan/Kuwait/Tunisia/Iraq/Bahrain/Algeria with wildly
-    # different per-unit values, so 1:1 USD is catastrophically wrong in
-    # either direction (Jordan/Amman is a common destination).
-    r"dinars?", r"tenge", r"levs?|leva", r"afghanis?", r"cedis?",
-    # fix-round-4: colloquial money words with no ISO/word entry at all —
-    # "quid" (British slang for GBP, a SUPPORTED currency: mis-prices AND
-    # falsely denies a currency was named) and "bucks" (US slang for USD:
-    # value coincidentally correct, but the "no currency stated" note still
-    # falsely contradicts the user's own words).
+    r"new\s+zealand\s+dollars?",
+    r"reais", r"rand", r"shekels?", r"swiss\s+francs?|francs?",
     r"quid", r"bucks?",
 )
 
@@ -3688,13 +3314,9 @@ def _scan_budget_raw(text: str) -> tuple[int | None, object | None, str | None]:
     of the impl's existing branches/precedence.
     """
     cents, err, provenance = _scan_budget_raw_impl(text)
-    # fix-round-5 (verified live bug): "budget $2000, wait no, $3000" scanned
-    # to $2000 — first-match-wins — even though "wait no" plainly marks $2000
-    # as retracted in favour of the restated $3000. Scoped narrowly: only
-    # overrides when the ORIGINAL match was the bare_dollar/bare_number "$"
-    # provenance (the case the verified bug and its regression test cover);
-    # a currency-code/word/symbol match is left alone rather than risking a
-    # currency-mismatched override for a case that hasn't been observed.
+    # "budget $2000, wait no, $3000" — a mid-sentence self-correction retracting the
+    # first amount in favour of the restated one. Scoped narrowly to the bare "$"
+    # provenance; a currency-code/word/symbol match is left alone.
     if provenance in ("bare_dollar", "bare_number"):
         corrected = _correction_override_budget_cents(text)
         if corrected is not None:
@@ -3814,11 +3436,9 @@ def _scan_budget_raw_impl(text: str) -> tuple[int | None, object | None, str | N
     # very common phrasing that otherwise slipped through (the number was no longer
     # directly adjacent to "dollars"), producing a spurious "no budget" clarification.
     word_to_code = {
-        # fix-round-1: spoken forms of SUPPORTED currencies (AUD/SGD) whose
-        # word forms were previously unrecognised — checked BEFORE the bare
-        # "dollars" entry so "singapore dollars" / "aussie dollars" resolve
-        # to SGD/AUD instead of falling through to a spurious "no budget"
-        # decline (or, worse, a bare_number USD mis-price).
+        # Spoken forms of SUPPORTED currencies (AUD/SGD), checked BEFORE the bare
+        # "dollars" entry so "singapore dollars"/"aussie dollars" resolve to SGD/AUD
+        # instead of falling through to USD.
         r"(?:sgd|singapore)\s+dollars?": "sgd",
         r"(?:aud|australian|aussie)\s+dollars?": "aud",
         r"(?:us|u\.s\.?a?\.?|usd|american)?\s*dollars?": "usd",
@@ -3901,12 +3521,10 @@ def _scan_budget_raw_impl(text: str) -> tuple[int | None, object | None, str | N
         return None, UNKNOWN_CURRENCY, None
 
     # ---- 5b. UNKNOWN currency detection, case-INSENSITIVE, curated list ----
-    # fix-round-1: the step-5 check above only matches UPPERCASE 3-letter
-    # codes, so a lowercase ISO code ("jpy 200000") silently fell through to
-    # the bare_number fallback and was mispriced 1:1 as USD (~150x for JPY).
-    # Matched only against a hand-curated set of real currency codes (never a
-    # blanket case-insensitive [A-Za-z]{3}) so ordinary words next to a number
-    # ("5000 for a trip") can never misfire as a currency decline.
+    # Step 5 above only matches UPPERCASE 3-letter codes, so a lowercase ISO code
+    # ("jpy 200000") needs its own pass — matched only against a hand-curated set of
+    # real currency codes (never a blanket case-insensitive [A-Za-z]{3}) so ordinary
+    # words next to a number never misfire as a currency decline.
     unsupported_codes = "|".join(sorted(_UNSUPPORTED_CURRENCY_CODES, key=len, reverse=True))
     m = re.search(rf"\b({unsupported_codes})\s*{num}\b", text, re.I)
     if not m:
@@ -3918,21 +3536,12 @@ def _scan_budget_raw_impl(text: str) -> tuple[int | None, object | None, str | N
         )
         return None, UNKNOWN_CURRENCY, None
 
-    # ---- 5c. UNKNOWN currency detection: spelled-out WORDS ("yen", "yuan",
-    #          "won", "rupees", "pesos", ...) for currencies we do not support.
-    # fix-round-1: previously these fell all the way through to the weakest
-    # bare_number fallback (mispriced 1:1 as USD, e.g. "200000 yen" -> $200,000)
-    # or, when no budget cue was directly adjacent, to (None, None, None) —
-    # indistinguishable from "no budget at all" and routed to the WRONG
-    # elicitation slot (BUDGET instead of CURRENCY). Checking here, before
-    # step 6, ensures a stated-but-unsupported currency word is always
-    # honestly declined rather than silently mispriced or mis-routed.
-    # fix-round-2: also check the WORD-then-NUMBER order ("spend won 800000",
-    # "budget of yen 200000") symmetrically with step 5b's code-detection,
-    # which already checks both orders. Previously only num-then-word matched,
-    # so a word-first phrasing missed every branch and fell to (None, None,
-    # None) — mis-routed to the BUDGET/duration clarification slot instead of
-    # an honest CURRENCY decline.
+    # ---- 5c. UNKNOWN currency detection: spelled-out WORDS ("yen", "yuan", "won",
+    #          "rupees", "pesos", ...) for currencies we do not support. Checked here
+    #          (before the bare_number fallback) so a stated-but-unsupported currency
+    #          word is honestly declined rather than silently mispriced 1:1 as USD or
+    #          mis-routed to the wrong elicitation slot. Checks both num-then-word and
+    #          word-then-number order ("spend won 800000", "budget of yen 200000").
     unsupported_words = "|".join(_UNSUPPORTED_CURRENCY_WORDS)
     if re.search(rf"{num}\s*(?:{unsupported_words})\b", text, re.I) or re.search(
         rf"\b(?:{unsupported_words})\s*{num}", text, re.I
@@ -3943,40 +3552,17 @@ def _scan_budget_raw_impl(text: str) -> tuple[int | None, object | None, str | N
         )
         return None, UNKNOWN_CURRENCY, None
 
-    # ---- 5d. UNKNOWN currency NAMED elsewhere in the text (not adjacent to
-    #          the number at all) — "budget 300000 (yen)", "keep it under
-    #          300000, prices are in yen", "spend up to 500000, that is yen
-    #          not dollars". Steps 5b/5c above require the code/word to sit
-    #          immediately next to the number; when the user names the
-    #          currency in a parenthetical or a separate clause, the amount
-    #          still fell through to the weakest bare_number/USD assumption
-    #          below WITH the honesty-inverting "no currency was stated" note
-    #          — even though the user explicitly named a currency. "won" is
-    #          deliberately excluded here (unlike step 5c) — it is also the
-    #          common English past tense of "win" ("I won a prize"), so a
-    #          match-anywhere-in-the-text scan for it would false-positive on
-    #          ordinary sentences; it stays covered by the adjacency-scoped
-    #          step 5c above.
-    # fix-round-2: deliberately WORDS only, never the 3-letter CODES list —
-    # several unsupported codes are also common English words when scanned
-    # WITHOUT number-adjacency ("try" == TRY, "rub" == RUB, "cad" == an
-    # archaic word), so an anywhere-in-text scan for codes would false-fire on
-    # ordinary sentences. Currency WORDS are far less prone to this collision
-    # ("won" is the one common-word exception, and is excluded below).
-    # fix-round-3: the same common-word-collision risk applies to a few of
-    # the newly-added currency words — "kip" (British slang for a nap/sleep),
-    # "lei" (a flower necklace), and "colon"/"colons" (the punctuation mark /
-    # body organ) — so they stay excluded from this anywhere-in-text scan the
-    # same way "won" is, and remain covered by the number-adjacency-scoped
-    # step 5c above.
-    # fix-round-4: "bucks?" (a male deer / an NBA team / "pass the buck") and
-    # "afghanis?" (also the common demonym for people from Afghanistan, "the
-    # Afghanis were welcoming") are common-word collisions the same way
-    # "won"/"kip"/"lei"/"colon" are — excluded from the anywhere-in-text scan,
-    # still covered by the adjacency-scoped step 5c above.
-    _ANYWHERE_SCAN_EXCLUDE = frozenset({
-        r"wons?", r"kips?", r"leis?", r"colon(?:es)?s?", r"bucks?", r"afghanis?",
-    })
+    # ---- 5d. UNKNOWN currency NAMED elsewhere in the text (not adjacent to the
+    #          number at all) — "budget 300000 (yen)", "prices are in yen". Steps
+    #          5b/5c above require the code/word to sit immediately next to the
+    #          number; this scans the whole text instead. WORDS only, never the
+    #          3-letter CODES list (several unsupported codes are also common
+    #          English words — "try", "rub" — which would false-fire on ordinary
+    #          sentences with no number-adjacency guard). A few currency words are
+    #          themselves common-word collisions ("won" = past tense of "win",
+    #          "bucks" = deer/NBA team) and stay excluded from this anywhere-scan,
+    #          remaining covered by the adjacency-scoped step 5c above.
+    _ANYWHERE_SCAN_EXCLUDE = frozenset({r"wons?", r"bucks?"})
     unsupported_words_anywhere = "|".join(
         w for w in _UNSUPPORTED_CURRENCY_WORDS if w not in _ANYWHERE_SCAN_EXCLUDE
     )
@@ -4010,73 +3596,30 @@ def _scan_budget_raw_impl(text: str) -> tuple[int | None, object | None, str | N
     # comma can never be mistaken for a stated amount.
     _num_strict = r"(\d(?:[\d,]*\d)?(?:\.\d+)?[kKmM]?)(?![A-Za-z])"
     _approx = r"(?:about|around|approx(?:\.|imately)?|roughly|~|up\s*to|nearly|close\s*to)\s+"
-    # fix-round-1: OVER-capture guard — "spend 5 days" / "max 4 of us" / "limit 2
-    # checked bags" / "budget 3 nights" put a DURATION/PARTY/luggage count, not a
-    # dollar amount, directly after a budget cue word. Without this negative
-    # lookahead the weakest (bare_number) signal silently grabbed that count as a
-    # tiny cents budget, SATISFYING the budget slot (no clarification asked) and
-    # then stranding the plan against an absurd $2-10 "budget".
-    # (?!\d) blocks the regex engine from backtracking the optional inner digit
-    # group down to a SHORTER run (e.g. "1" out of "10") just to dodge the
-    # unit-word lookahead below with the leftover "0" — without it, "spend 10
-    # days" would still match "1" (as $1) instead of correctly rejecting the
-    # whole "10 days" span.
-    # fix-round-2: the OVER-capture guard above only blacklisted DURATION/
-    # PARTY/LUGGAGE nouns. A hotel STAR rating ("max 5 star hotels only") or an
-    # activity/POI count ("up to 10 attractions", "up to 8 museums", "up to 6
-    # tours", "budget 90 percent beaches") right after a budget cue word is the
-    # exact same failure mode — the count/rating gets grabbed as an absurd
-    # tiny cents "budget", SATISFYING the slot (no clarification asked) and
-    # silently stranding the plan.
+    # OVER-capture guard — "spend 5 days" / "max 4 of us" / "limit 2 checked bags" put
+    # a DURATION/PARTY/luggage/rating/POI-count/misc-quantity, not a dollar amount,
+    # directly after a budget cue word. Without this negative lookahead the weakest
+    # (bare_number) signal would silently grab that count as a tiny cents budget,
+    # SATISFYING the budget slot (no clarification asked) and stranding the plan
+    # against an absurd figure. (?!\d) blocks the regex from backtracking the digit
+    # group to a shorter run just to dodge the unit-word lookahead.
     _num_strict_budget = (
         r"(\d(?:[\d,]*\d)?(?:\.\d+)?[kKmM]?)(?!\d)(?![A-Za-z])"
         r"(?!\s*(?:days?|nights?|weeks?|months?|years?|minutes?|min|mins?|hours?|"
         r"of\s+us|people|persons?|pax|px|adults?|kids?|children|"
         r"(?:checked\s+)?bags?|suitcases?|"
         r"stars?|attractions?|museums?|tours?|activit(?:y|ies)|percent|%|"
-        # fix-round-3: more non-money quantities that sit right after a
-        # budget cue word the same way days/nights/stars/percent already do —
-        # a proximity/layover/temperature/weight/step/flight/photo count, NOT
-        # a dollar amount. Each of these was previously grabbed as an absurd
-        # tiny cents "budget" (e.g. "within 20 min of the beach" -> $20),
-        # SATISFYING the slot with no clarification and silently stranding
-        # the plan against that absurd figure.
         r"layovers?|stops?|connections?|"
         r"degrees?|celsius|fahrenheit|"
         r"kgs?|kilograms?|kms?|kilometers?|kilometres?|miles?|meters?|metres?|"
         r"lbs?|pounds?|"
         r"steps?|flights?|calories?|photos?)\b)"
     )
-    # fix-round-1: UNDER-capture fix — natural budget phrasings where the number
-    # is not immediately adjacent to a bare cue word ("budget OF 3000", "budget IS
-    # 3000", "my budget: 3000", "no more than 3000", "keep it around 3000",
-    # "trying not to go over 3000", "aim for about 3k", "ballpark 2500", "up to 3k
-    # total") previously fell through every pattern and produced a self-contradicting
-    # "I could not find a budget" decline despite the literal word "budget" (or an
-    # equally clear budget-cap phrase) being present. Widened cue-phrase set +
-    # optional ":"/"-"/"is"/"of" connector between the cue and the amount.
-    # fix-round-2: "my max IS 3000" needs the same optional "is"/"of" connector
-    # that "budget" already gets; "stay within 3000" / "cap it at 3000" use cue
-    # words ("within"/"cap ... at") that were entirely absent from this set —
-    # both fell all the way through to a self-contradicting "I could not find
-    # a budget" decline despite a plainly-stated numeric ceiling.
-    # fix-round-3: more natural budget-ceiling phrasings still missing —
-    # "cant spend more than"/"exceed" (a ceiling verb with no adjacent
-    # "budget"/"limit" cue at all), "keep costs down to" (only "keep it
-    # around/under" was covered, not this equally common variant), and
-    # "in the region of"/"region of" (a British-English hedge for an
-    # approximate ceiling). Each of these previously fell through every
-    # pattern to a self-contradicting "I could not find a budget" decline
-    # despite the user literally stating a numeric ceiling.
-    # fix-round-4: more natural budget-ceiling phrasings still missing.
-    #   - a bare "budget cap"/"cap" NOUN with no trailing "at" ("budget cap
-    #     3000") — only the "cap(?:ped)?...at" VERB phrasing was covered, so
-    #     the word "cap" sitting between "budget" and the number broke the
-    #     "budget" cue's reach, and the "cap...at" cue required a trailing
-    #     "at" this phrasing lacks — producing a SELF-CONTRADICTING decline
-    #     (the literal word "budget" sits right next to the number).
-    #   - "total of" / "afford" / "ceiling" / "nothing over" — unambiguous
-    #     stated ceilings with no cue word from the set below at all.
+    # UNDER-capture fix — natural budget phrasings where the number isn't immediately
+    # adjacent to a bare cue word ("budget OF 3000", "no more than 3000", "keep it
+    # around 3000", "in the region of 3k") otherwise fell through to a self-
+    # contradicting "I could not find a budget" decline despite a plainly-stated
+    # ceiling. Widened cue-phrase set + optional ":"/"-"/"is"/"of" connector.
     _budget_cue_phrases = (
         r"under|budget(?:\s+is|\s+of)?|budget\s+cap|cap(?:ped)?|"
         r"max(?:imum)?(?:\s+is)?|limit|spend|cost|"
@@ -4090,11 +3633,8 @@ def _scan_budget_raw_impl(text: str) -> tuple[int | None, object | None, str | N
     )
     for pat in (
         rf"(?:{_budget_cue_phrases})\s*(?::|-)?\s*(?:{_approx})?{_num_strict_budget}",
-        # fix-round-2: "3000 max" — the extremely common trailing-cue form —
-        # previously matched neither pattern (only trailing "budget"/"limit"
-        # were accepted), silently dropping a plainly-stated ceiling.
+        # "3000 max" / "3000 or less" — trailing-cue ceiling forms.
         rf"{_num_strict_budget}\s+(?:budget|limit|max(?:imum)?)\b",
-        # fix-round-3: "3000 or less" — another common trailing-ceiling form.
         rf"{_num_strict_budget}\s+or\s+less\b",
     ):
         m = re.search(pat, text, re.I)
@@ -4295,31 +3835,19 @@ def _scan_date_range_nights_fallback(text: str) -> int | None:
     return None
 
 
-# fix-round-3: "a/one week" is a genuine 7-night duration statement (see the
-# fix-round-2 comment below) UNLESS it is immediately followed by "ago"/
-# "from" — "a week ago", "a week from now/today/tomorrow/Monday" state WHEN a
-# trip departs (or a past reference), never a trip LENGTH. The in-code
-# assumption that departure-timing phrases "never start with a/one" was
-# false; the trailing-word check here is what actually disambiguates them
-# (the leading-"in" case is checked separately at the call site, since a
-# fixed-width lookbehind can't span the variable "about"/"around" hedge).
+# "a/one week" is a genuine 7-night duration statement UNLESS immediately followed
+# by "ago"/"from" — "a week ago", "a week from now" state WHEN a trip departs (or a
+# past reference), never a trip LENGTH.
 _WEEK_DURATION_RE = re.compile(
     r"\b(?:a|one)\s+(?:\w+\s+)?week\b(?!\s+(?:ago\b|from\b))", re.I,
 )
 
-# fix-round-4: a small, bounded-proximity context signal that an "N days"/
-# "N weeks" mention is INCIDENTAL (visa validity, booking lead time, a
-# refund/cancellation window, or pre-trip prep time) rather than the trip's
-# own length — see the guard in ``_scan_nights`` below.
-#
-# fix (in-N-days start-date hijack): the SAME incidental-context problem
-# afflicts the "in N days" START-DATE scanner in ``_scan_start_date_raw`` —
-# "my visa expires in 90 days. 4 nights in Tokyo" was resolving the trip's
-# checkin to today+90 (visa-expiry hijacking the START DATE, not just a
-# duration), and "the sale ends in 3 days" did the same for a promo window.
-# Widened with expiry/commerce-deadline terms (expire/expiry, sale, deal,
-# offer, warranty, lease, subscription, membership) so both scanners share
-# one guard — see ``_is_incidental_context`` below.
+# A bounded-proximity context signal that an "N days"/"N weeks" mention is
+# INCIDENTAL (visa validity, booking lead time, a refund/cancellation/expiry/sale
+# window, or pre-trip prep) rather than the trip's own length — shared by both the
+# nights/duration scanner and the "in N days" start-date scanner (see
+# ``_is_incidental_context`` below), so e.g. "my visa expires in 90 days" never
+# hijacks the trip's real stated length or start date.
 _INCIDENTAL_DURATION_CONTEXT_RE = re.compile(
     r"\bvisa\b|\bin\s+advance\b|\brefund\b|\bcancellation\b|\bnotice\s+period\b|"
     r"\bwedding\s+prep|\bprep(?:aration)?\b|\bexpir(?:e|es|ed|y|ation)\b|\bsale\b|"
@@ -4342,31 +3870,13 @@ def _is_incidental_context(text: str, start: int, end: int) -> bool:
     return _INCIDENTAL_DURATION_CONTEXT_RE.search(ctx) is not None
 
 
-# fix-round-5: correction-cue phrases, each optionally chained ("actually,
-# make it 5"), immediately followed by a re-stated bare duration NUMBER
-# (optionally with a "nights"/"days" unit — the number alone, as in "make it
-# 5", is what the verified live bug needs since it has no unit of its own).
-# Matches the verified live bug ("2 nights in Rome... actually make it 5").
-#
-# Follow-up fix: the original follow-up fix
-# used a negative lookahead enumerating party/pax/room nouns to exclude
-# ("actually make it 4 adults" isn't a duration correction). An
-# adversarial review pass rejected that as a NEW regression source: it's
-# an enumerated DENY-list, the exact bug class this same file already learned
-# (via the non-Latin-script rounds) can never be complete. Concrete breaks:
-# "make it 5 of us" (missing "of us" from the list -- the file's own party
-# regexes elsewhere DO recognize it), "make it 5 star hotels" / "make it 2
-# twin rooms" (a modifier word between the number and the noun defeats
-# adjacency-only matching), "make it 3 grand" (money, not covered at all).
-#
-# Fixed by inverting to an ALLOW-list instead: the bare-number branch (no
-# explicit nights/days unit) only counts as a duration correction if the
-# number is followed by nothing else at all -- end of string or punctuation.
-# ANY trailing word (whatever it is -- party noun, adjective, unit of money,
-# something not yet seen) disqualifies it, so there is no vocabulary list to
-# keep falling behind. When an explicit "nights"/"days" unit IS stated
-# ("actually make it 5 nights in Rome"), that's unambiguous regardless of
-# what follows, so no such restriction applies to that branch.
+# Correction-cue phrases, each optionally chained ("actually, make it 5"),
+# immediately followed by a re-stated bare duration NUMBER (optionally with a
+# "nights"/"days" unit). The bare-number branch (no explicit unit) only counts as a
+# duration correction if nothing else (or punctuation) follows the number — an
+# ALLOW-list by trailing-position rather than an enumerated DENY-list of nouns to
+# exclude ("make it 4 adults" isn't a duration correction; "make it 5 nights" is
+# unambiguous regardless of what follows).
 _NIGHTS_CORRECTION_CUE_RE = re.compile(
     r"(?:actually|wait,?\s*no|i\s*mean|scratch\s+that|make\s+it)"
     r"(?:[,\s]+(?:actually|wait,?\s*no|i\s*mean|scratch\s+that|make\s+it))*"
@@ -4524,22 +4034,15 @@ def _scan_nights_impl(text: str) -> int | None:
         "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
         "couple of": 2, "couple": 2, "few": 3,
     }
-    # fix-round-3: both the digit and word-number "N week(s)" patterns below
-    # (via the optional "s" in "weeks?") ALSO match departure-timing / past-
-    # reference phrases ("2 weeks ago", "a week from now", "in about a
-    # week") — the SAME false-positive class the later bare "a/one week"
-    # catch-all guards against. Without excluding them here, this EARLIER
-    # candidate-collection block fired and returned before that later guard
-    # was ever reached, silently fabricating a duration out of pure timing
-    # language. `_week_num_valid` mirrors the guard used for the bare "a/one
-    # week" catch-all further below.
+    # Digit and word-number "N week(s)" also match departure-timing / past-reference
+    # phrases ("2 weeks ago", "a week from now", "in about a week", "3 weeks in
+    # advance") — excluded here the same way the bare "a/one week" catch-all guards
+    # against it further below.
     def _week_num_valid(start: int, end: int) -> bool:
         if re.search(r"^\s*(?:ago\b|from\b)", lowered[end:]):
             return False
         if re.search(r"\bin\s+(?:about\s+|around\s+)?$", lowered[max(0, start - 20):start]):
             return False
-        # fix-round-4: same incidental-duration guard as the "N days" collector
-        # above ("booked 3 weeks in advance", "4 weeks of wedding prep").
         if _is_incidental_duration(start, end):
             return False
         return True
@@ -4555,10 +4058,8 @@ def _scan_nights_impl(text: str) -> int | None:
             _candidates.append(_WORD_NUM[m.group(1)] * 7)
             break
     if _candidates:
-        # fix-round-1: cap at _MAX_DATE_RANGE_NIGHTS — the same ceiling the
-        # date-range scan already enforces — so an absurd/typo'd duration
-        # ("9999 nights") is dropped rather than silently accepted (a genuine
-        # OTHER candidate in the same text, if any, still wins over decline).
+        # Cap at _MAX_DATE_RANGE_NIGHTS so an absurd/typo'd duration ("9999 nights")
+        # is dropped rather than silently accepted.
         _sane = [c for c in _candidates if 0 < c <= _MAX_DATE_RANGE_NIGHTS]
         if _sane:
             return max(_sane)
@@ -4569,36 +4070,20 @@ def _scan_nights_impl(text: str) -> int | None:
         return 3
     if re.search(r"\bweekend\b", lowered):
         return 2
-    # fix-round-2: the unqualified `\bweek\b` catch-all REMOVED — it matched any
-    # sentence containing the standalone token "week" regardless of meaning,
-    # fabricating a 7-night duration out of pure departure-TIMING phrases that
-    # state no duration at all ("this week", "next week", "during the week",
-    # "sometime this week", "sale ends this week"). "a week"/"one week" is a
-    # genuine, unambiguous 7-night duration statement and is kept — including
-    # with a single adjective in between ("a beach week", "a relaxing week"),
-    # which is still an unambiguous duration statement, not a departure-timing
-    # phrase (those never start with "a"/"one").
-    # fix-round-3: that assumption was wrong for two common shapes — "a/one
-    # week" immediately followed by "ago"/"from" ("a week ago", "a week from
-    # now/today/tomorrow/Monday") states WHEN a trip departs (or a past
-    # reference), never a trip LENGTH; and "a/one week" immediately preceded
-    # by "in [about/around]" ("leaving in a week", "in about a week") is the
-    # same departure-timing meaning. Both still start with "a"/"one" and were
-    # silently fabricating a 7-night duration the user never stated.
+    # An unqualified `\bweek\b` catch-all is deliberately NOT used — it would match
+    # any sentence containing the standalone token "week" regardless of meaning
+    # ("this week", "next week"). "a/one week" (optionally with one adjective: "a
+    # beach week") is a genuine, unambiguous 7-night statement — UNLESS immediately
+    # followed by "ago"/"from" or preceded by "in [about/around]", which are
+    # departure-timing phrases, not a trip length.
     for _wm in _WEEK_DURATION_RE.finditer(lowered):
         _pre = lowered[max(0, _wm.start() - 20):_wm.start()]
         if re.search(r"\bin\s+(?:about\s+|around\s+)?$", _pre):
             continue
         return 7
-    # fix-round-3: "week-long" (no leading article) is just as unambiguous a
-    # 7-night duration statement as "a week-long" (which already worked via
-    # the embedded "a week" match above) — but bare "week-long"/"weeklong"
-    # with no article matched no pattern at all, silently falling through to
-    # a false "how many nights?" clarification despite the user having
-    # plainly stated a week-long trip. Unlike the removed bare "week"
-    # catch-all, "week-long" is never a departure-timing phrase ("this
-    # week-long"/"next week-long" is not idiomatic English), so this is safe
-    # to recognise unconditionally.
+    # "week-long"/"weeklong" (no leading article) is just as unambiguous a 7-night
+    # statement, and unlike bare "week" is never a departure-timing phrase, so it's
+    # safe to recognise unconditionally.
     if re.search(r"\bweek-?long\b", lowered):
         return 7
     # Fallback: no explicit night/day/week count found anywhere above — check for an
@@ -4606,14 +4091,10 @@ def _scan_nights_impl(text: str) -> int | None:
     return _scan_date_range_nights(text)
 
 
-# fix-round-4: `_scan_nights` returns None both for "no duration stated at all"
-# AND for "a duration WAS stated but exceeds `_MAX_DATE_RANGE_NIGHTS`" (e.g.
-# "200 nights") — the two are collapsed into the same None, so the caller's
-# "I could not find a trip duration" message is factually false in the second
-# case (a duration was found and understood, then rejected for being
-# implausibly long). This lightweight, SEPARATE scan lets the caller tell the
-# two apart to word the decline honestly, without changing `_scan_nights`'s
-# return contract (every existing caller is untouched).
+# `_scan_nights` returns None both for "no duration stated at all" AND for "a
+# duration WAS stated but exceeds `_MAX_DATE_RANGE_NIGHTS`" — this lightweight,
+# separate scan lets the caller tell the two apart to word the decline honestly,
+# without changing `_scan_nights`'s return contract.
 def _scan_nights_over_cap(text: str) -> int | None:
     """Return an explicitly-stated night/day/week duration that EXCEEDS
     ``_MAX_DATE_RANGE_NIGHTS``, or None if no candidate does. Mirrors the
@@ -4697,49 +4178,17 @@ _COMPANION_WORDS_RE = r"(?:wife|husband|spouse|partner|mom|mum|dad|mother|father
 # plural "couples".
 _N_COUPLES_RE = re.compile(r"\b(\d+)\s+couples\b", re.I)
 
-# Small, closed word-to-number set shared by the "two people"/"for two" round-2
-# #party-fix patterns below — deliberately bounded (two..six), matching the scope
-# already used for the "<N> of us" word-number variant. ("six" added fix-round-1
-# alongside the "adults" noun below — see _scan_adults_raw.)
-# fix-round-2: extended through "twelve" — the cap used to stop at "six", so an
-# explicitly-stated word-number party of seven or more ("seven adults", "eight
-# adults", "ten people") matched neither the digit regex nor this set and silently
-# defaulted the WHOLE stated party to 1 adult with no undercount disclosure.
-# fix-round-3: extended through "twenty" — a spelled-out party ABOVE twelve
-# ("fifteen adults", "twenty people") is uncommon for leisure but realistic for
-# corporate offsites/retreats, and previously matched no branch at all, silently
-# mispricing a 20-person booking as a single adult.
+# Small, closed word-to-number set shared by the "two people"/"for two" party-size
+# patterns below, and by "family of <N>"/"party of <N>" word-number totals — bounded
+# at twelve; a spelled-out party larger than that is rare enough that it falls back
+# to the digit-number path ("12 adults") instead.
 _PARTY_WORDNUM: dict[str, int] = {
     "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
-    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
 }
 _PARTY_WORDNUM_ALT = (
-    r"two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
-    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty"
+    r"two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
 )
-
-# fix-round-4: compound spelled-out numerals ("twenty-five", "thirty-four",
-# "forty-five") above twenty. The single-token patterns below (m1c/m2w) only
-# match ONE word from _PARTY_WORDNUM_ALT — a hyphen/space in a compound
-# numeral is a non-word boundary, so those patterns previously matched only
-# the TRAILING unit word abutting the noun ("five adults" inside "twenty-five
-# adults"), silently returning a plausible-looking WRONG non-default count
-# (5 instead of 25) with no undercount disclosure. Deliberately does NOT
-# include bare "thirty"/"forty"/etc. as their own standalone party sizes —
-# that is the pre-existing, intentionally-bounded "thirty"->None->default-1
-# gap; this only recognises a tens word when it is compounded with a unit.
-_PARTY_TENS_WORDNUM: dict[str, int] = {
-    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
-    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
-}
-_PARTY_TENS_ALT = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
-_PARTY_UNIT_WORDNUM: dict[str, int] = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9,
-}
-_PARTY_UNIT_ALT = "one|two|three|four|five|six|seven|eight|nine"
 
 
 def _scan_adults_raw(text: str) -> int | None:
@@ -4779,28 +4228,9 @@ def _scan_adults_raw(text: str) -> int | None:
     m1b = re.search(r"\b(two|three)\s+of\s+us\b", lowered)
     if m1b:
         return {"two": 2, "three": 3}[m1b.group(1)]
-    # round-2 #party-fix: WORD-number variant of "N people"/"N persons" — the digit
-    # regex above only matches bare DIGITS ("2 people"), so prose like "two people"
-    # fell through to the solo default. Small closed word-to-number set (two..six),
-    # matching the scope already used for "<N> of us" just above.
-    # fix-round-1: "adults?" added to the noun alternation — the digit regex above
-    # only matches "2 adults" (bare digit), so "two adults"/"six adults" fell all
-    # the way through to the solo default (1), silently mispricing lodging/insurance
-    # for the whole stated party with no disclosure.
-    # fix-round-4: compound numeral ("twenty-five adults") — checked BEFORE
-    # the single-token m1c below, which would otherwise match only the
-    # trailing unit word ("five adults") and silently return 5 for a
-    # 25-person party. See _PARTY_TENS_WORDNUM/_PARTY_UNIT_WORDNUM above.
-    m1c_compound = re.search(
-        r"\b(" + _PARTY_TENS_ALT + r")[\s-]+(" + _PARTY_UNIT_ALT + r")\s*"
-        r"(?:adults?|people|persons?)\b",
-        lowered,
-    )
-    if m1c_compound:
-        return (
-            _PARTY_TENS_WORDNUM[m1c_compound.group(1)]
-            + _PARTY_UNIT_WORDNUM[m1c_compound.group(2)]
-        )
+    # WORD-number variant of "N people"/"N persons"/"N adults" — the digit regex
+    # above only matches bare DIGITS ("2 people"), so prose like "two adults" needs
+    # this separate closed word-to-number pass.
     m1c = re.search(
         r"\b(" + _PARTY_WORDNUM_ALT + r")\s*"
         r"(?:adults?|people|persons?)\b",
@@ -4818,50 +4248,20 @@ def _scan_adults_raw(text: str) -> int | None:
     m2 = re.search(r"\b(?:family|group|party)\s+of\s+(\d+)\b", lowered)
     if m2:
         return max(1, int(m2.group(1)))
-    # fix-round-3: WORD-number variant — "family of four" / "group of six" /
-    # "party of three". The digit-only pattern above matched neither this nor
-    # the generic word-number fallback (m1c, which requires an "adults?/
-    # people/persons" noun, not "of <N>"), so a word-number party TOTAL fell
-    # through to the solo default with no undercount disclosure — the whole
-    # family silently priced as 1 adult.
-    # fix-round-4: compound numeral variant ("group of twenty-five") — same
-    # trailing-token-only bug as m1c_compound above, but here the m2w pattern
-    # below would match the LEADING tens word ("twenty" of "twenty-five"),
-    # silently returning 20 instead of 25. Checked first for the same reason.
-    m2w_compound = re.search(
-        r"\b(?:family|group|party)\s+of\s+("
-        + _PARTY_TENS_ALT + r")[\s-]+(" + _PARTY_UNIT_ALT + r")\b",
-        lowered,
-    )
-    if m2w_compound:
-        return (
-            _PARTY_TENS_WORDNUM[m2w_compound.group(1)]
-            + _PARTY_UNIT_WORDNUM[m2w_compound.group(2)]
-        )
+    # WORD-number variant — "family of four" / "group of six" / "party of three".
+    # The digit-only pattern above matched neither this nor the generic word-number
+    # fallback (m1c, which requires an "adults?/people/persons" noun, not "of <N>").
     m2w = re.search(
         r"\b(?:family|group|party)\s+of\s+(" + _PARTY_WORDNUM_ALT + r")\b",
         lowered,
     )
     if m2w:
         return _PARTY_WORDNUM[m2w.group(1)]
-    # "with my wife" / "my husband and I" / "and my partner" — no numeric token, but
-    # naming a spouse/partner/close-relative implies the (implicit) speaker PLUS that
-    # companion = 2 adults. Checked AFTER every numeric pattern above so an explicit
-    # count ("3 adults including my wife") always wins over this inference — this only
-    # fires when the text carries no numeric party-size signal at all.
-    # "husband and I" / "my sister and I" (#202/party-07) — same companion-word
-    # semantics as the "my <companion>" check above, but without requiring the "my"
-    # possessive immediately before the word. Anchored tightly to "<companion-word>
-    # and i" so unrelated "X and I" phrasing ("waiting and I think...") never matches —
-    # the word directly before "and I" must itself be one of the closed companion words.
-    # BUG 4 fix (round-2): both checks used to unconditionally `return 2` on the
-    # FIRST companion-word match, regardless of how many DISTINCT companions were
-    # actually named ("with my wife and my sister" is speaker + 2 = 3, not 2).
-    # Collect every distinct companion word matched by EITHER pattern (deduped by
-    # word, so "my sister ... sister and I" naming the same relation twice still
-    # counts as one person) and return 1 (the implicit speaker) + that count —
-    # mirrors how _N_COUPLES_RE above multiplies by the stated N rather than
-    # hardcoding a single couple's worth.
+    # "with my wife" / "my husband and I" — no numeric token, but naming a spouse/
+    # partner/close-relative implies the (implicit) speaker PLUS that companion.
+    # Checked AFTER every numeric pattern so an explicit count always wins. Collects
+    # every DISTINCT companion word matched (deduped) and returns 1 (the speaker) +
+    # that count, so "with my wife and my sister" correctly totals 3, not 2.
     _companions: set[str] = set()
     for _cm in re.finditer(rf"\bmy\s+({_COMPANION_WORDS_RE})\b", lowered):
         _companions.add(_cm.group(1))
@@ -4911,50 +4311,20 @@ _CHILDREN_WORD_NUM = {
     **_PARTY_WORDNUM,
 }
 
-# fix-round-1: children MENTIONED but with no leading count at all ("our
-# children", "the kids are coming", "bringing our children along") were
-# invisible to _CHILDREN_RE (which requires a numeric/article quantifier
-# immediately before the noun) — so no ignored_children disclosure ever
-# fired, silently defeating the entire honesty guarantee _scan_children
-# exists for (see GAP 3 comment above). This is a narrow, closed-vocabulary
-# fallback (possessive/article + kid noun, no quantifier) that resolves to a
-# conservative "at least 1" count purely so the disclosure fires — it does
-# NOT claim to know the exact number.
-# fix-round-2: two more gaps in this same fallback closed —
-# (a) "toddlers?"/"infants?"/"babies"/"baby"/"newborns?" were present in the
-#     QUANTIFIED regex above but missing here, so "our toddler"/"my infant"
-#     were invisible even though "a toddler" correctly resolved to 1;
-# (b) a possessive/article (my/our/the) was REQUIRED immediately before the
-#     noun, so equally common phrasings that mention children with no
-#     leading quantifier at all ("kids in tow", "a trip with children",
-#     "travelling with kids", "bringing children to Rome") were invisible.
-#     These extra alternatives are deliberately narrow, closed-vocabulary cue
-#     phrases (with/bringing/in tow) — not a blanket "any mention of kids" —
-#     so a negated statement like "no kids"/"without kids" still does not
-#     misfire (neither "with" nor "bringing" nor "in tow" appears in them).
-# fix-round-5: a single descriptive adjective sitting between the
-# possessive and the child-noun ("our twin toddlers", "our young kids")
-# defeated the strict adjacency the possessive branch required, so
-# children silently resolved to 0 with NO ignored_children disclosure —
-# the same honesty-guarantee failure this whole regex exists to prevent,
-# and it cascades into the family-persona inference (a stated family of 4
-# gets priced/planned as adults=1 when the child count is missed). Fix is
-# a narrow, closed-vocabulary adjective slot (0-2 words) rather than a
-# blanket "any word(s) in between", so it stays a targeted extension
-# rather than a wildcard gap.
+# Children MENTIONED but with no leading count at all ("our children", "the kids are
+# coming") are invisible to _CHILDREN_RE (which requires a numeric/article quantifier
+# immediately before the noun) — so no ignored_children disclosure would ever fire,
+# silently defeating the honesty guarantee _scan_children exists for. This narrow,
+# closed-vocabulary fallback (possessive/article [+ 0-2 descriptive adjectives] + kid
+# noun, no quantifier — plus a small set of no-possessive cue phrases: "with kids",
+# "kids in tow", "bringing kids") resolves to a conservative "at least 1" count purely
+# so the disclosure fires — it does NOT claim to know the exact number.
 _CHILDREN_UNQUANTIFIED_RE = re.compile(
     r"\b(?:my|our|the)\s+"
     r"(?:(?:twin|twins|young|little|small|tiny|baby|toddler|infant|"
     r"newborn|older|younger|teenage|teenaged)\s+){0,2}"
     r"(?:kids?|children|child|toddlers?|infants?|babies|baby|newborns?|"
     r"little\s+ones?)(?!-)\b"
-    # fix-round-3: the three NO-possessive branches below were hard-coded to
-    # kids/children/child only, unlike the possessive branch above (and the
-    # quantified _CHILDREN_RE) which both already include toddlers/infants/
-    # babies/newborns/little-ones. So "travelling with toddlers", "bringing
-    # infants", "babies in tow" were invisible — children=0 with NO
-    # ignored_children disclosure, silently defeating the honesty guarantee
-    # this whole regex exists for.
     r"|\bwith\s+(?:kids?|children|child|toddlers?|infants?|babies|baby|"
     r"newborns?|little\s+ones?)(?!-)\b"
     r"|\b(?:kids?|children|child|toddlers?|infants?|babies|baby|newborns?|"
@@ -5033,8 +4403,7 @@ _PARTY_TOTAL_RE = re.compile(
     r"\b(?:family|group|party)\s+of\s+(\d+)\b"
     r"|\b(\d+)\s*(?:people|persons?|pax|px)\b"
     r"|\b(two|three|four|five)\s+of\s+us\b"
-    # fix-round-3: word-number "family of four"/"group of six" TOTAL — same
-    # gap as the digit-only pattern above, kept as its own group so the
+    # Word-number "family of four"/"group of six" TOTAL, kept as its own group so the
     # existing group(1)/(2)/(3) indices are untouched.
     r"|\b(?:family|group|party)\s+of\s+(" + _PARTY_WORDNUM_ALT + r")\b",
     re.I,
@@ -5774,12 +5143,10 @@ def _pair_cities_with_vibes(
         slug_to_tokens.setdefault(slug, []).append(tok)
 
     city_positions: list[int] = []
-    # fix-round-3: tracks whether each city's position is a REAL text match
-    # (True) vs the degenerate cursor fallback used for a region-expanded
-    # anchor city that has no literal token in the text at all (False) — the
-    # cities-then-vibes positional-pairing special case below must never
-    # fire on those dummy sequential positions (see the region-expansion
-    # regression this guards against).
+    # Tracks whether each city's position is a REAL text match (True) vs the
+    # degenerate cursor fallback used for a region-expanded anchor city with no
+    # literal token in the text (False) — the cities-then-vibes positional-pairing
+    # special case below must never fire on those dummy sequential positions.
     city_positions_found: list[bool] = []
     cursor = 0
     for slug in real_seq:
@@ -5808,16 +5175,11 @@ def _pair_cities_with_vibes(
     # unclaimed vibe ("culture"), giving the semantically-correct hanoi=culture / ha long=cruise.
     claimed_vibes = set(companion_vibes.values())
 
-    # fix-round-1: EXPLICIT vibe->city bindings — "<vibe> [in/for/at/to] <City>", either
-    # the prepositional form ("beach in Da Nang", pre-enumerated "culture in Bangkok")
-    # or the bare adjective form ("a relaxing Hanoi trip") — ties a vibe DIRECTLY to a
-    # named city regardless of city-listing order or the forward-window position below.
-    # Without this: (a) a vibe sitting BEFORE its intended city was either swallowed by
-    # an unrelated PRECEDING city's forward window (the last-listed city's window spans
-    # to end-of-text and greedily grabs the first hit) or never captured at all; (b) a
-    # trailing "vibe in City" clause written AFTER every city was already listed left the
-    # earlier cities' (empty) forward windows with nothing. Reserved so no other city's
-    # window scan can steal a vibe that is explicitly bound elsewhere.
+    # EXPLICIT vibe->city bindings — "<vibe> [in/for/at/to] <City>", either the
+    # prepositional form ("beach in Da Nang") or the bare adjective form ("a relaxing
+    # Hanoi trip") — ties a vibe DIRECTLY to a named city regardless of city-listing
+    # order or the forward-window position below, so no other city's window scan can
+    # steal a vibe that is explicitly bound elsewhere.
     _vibe_alt = "|".join(sorted((re.escape(t) for t in token_to_vibe), key=len, reverse=True))
     _explicit_bind_vpos_to_city: dict[int, str] = {}
     if _vibe_alt:
@@ -5840,43 +5202,24 @@ def _pair_cities_with_vibes(
             _vibe_pool.append(_vc)
     _used_vibes: set[str] = set()
 
-    # fix-round-3: when EVERY real city is named before ANY (unclaimed,
-    # unbound) vibe is stated at all ("Hanoi, Hue and Da Nang: culture,
-    # history and beach"), the last city's unbounded forward window
-    # (next_pos = len(lowered)+1) greedily grabs the FIRST such vibe while
-    # every earlier city's window is empty — earlier legs silently lose
-    # their vibe and the last leg is mislabeled with the wrong (first-
-    # listed) vibe instead of the one positionally aligned to it. Detect
-    # this shape and fall back to a straight proportional pairing: the Nth
-    # city takes the vibe at floor(N * len(vibes) / len(cities)) — matching
-    # how a reader would naturally align "City1, City2, City3: vibeA,
-    # vibeB, vibeC", and naturally carrying a vibe forward to a later city
-    # when there are fewer vibes than cities.
+    # When EVERY real city is named before ANY (unclaimed, unbound) vibe is stated at
+    # all ("Hanoi, Hue and Da Nang: culture, history and beach"), the last city's
+    # unbounded forward window would otherwise greedily grab the FIRST such vibe while
+    # every earlier city's window is empty. Detect this shape and fall back to a
+    # straight proportional pairing: the Nth city takes the vibe at
+    # floor(N * len(vibes) / len(cities)) — matching how a reader would naturally
+    # align "City1, City2, City3: vibeA, vibeB, vibeC".
     _trailing_vibes: list[str] = [
         vcanon for vpos, vcanon in vibe_hits
         if vcanon not in claimed_vibes and vpos not in _explicit_bind_vpos_to_city
     ]
-    # bug fix: a vibe word GLUED directly onto the LAST city's own tokens with no
-    # separator ("ha long beach") is a compound reference to THAT city alone, not a
-    # genuine trailing vibe LIST for proportional distribution across every city
-    # ("Hanoi, Hue and Da Nang: culture, history and beach", where the vibes are
-    # clearly separated from the cities by ": "). Distinguish the two by requiring
-    # something other than pure whitespace between the end of the last city's own
-    # token match and the first unclaimed/unbound trailing vibe — without this,
-    # "hanoi then ha long beach" incorrectly proportionally-paired "beach" onto
-    # BOTH hanoi and ha long instead of leaving hanoi's vibe unset (the plain
-    # per-city window logic already gets this right on its own; this guard just
-    # stops the override from firing when it shouldn't).
-    # adversarial-audit follow-up: take the LONGEST matching token's end, not the
-    # first one tried — mirrors _build_city_regex's own longest-first sort
-    # (module docstring: "sorted longest-first so the regex engine matches the
-    # longest token on overlap"). slug_to_tokens has no such ordering guarantee
-    # (built by iterating CITY_ALIASES/city_aliases.json/ALLOWED_CITIES in
-    # whatever order those collections yield), so for ~68 slugs where a
-    # SHORTER alias happens to be listed before the full name (e.g. "rio"
-    # before "rio de janeiro") breaking on the first match underestimated
-    # _last_city_end, leaving the city's own trailing characters ("de janeiro")
-    # in the "gap" — non-whitespace, so the glued-vibe guard failed to fire.
+    # A vibe word GLUED directly onto the LAST city's own tokens with no separator
+    # ("ha long beach") is a compound reference to THAT city alone, not a genuine
+    # trailing vibe LIST — distinguished by requiring something other than pure
+    # whitespace between the end of the last city's own token match and the first
+    # unclaimed/unbound trailing vibe. Takes the LONGEST matching token's end (mirrors
+    # _build_city_regex's longest-first sort — slug_to_tokens has no such ordering
+    # guarantee on its own).
     _last_city_end = city_positions[-1] if city_positions else 0
     if real_seq:
         for _tok in slug_to_tokens.get(real_seq[-1], [real_seq[-1]]):
@@ -5885,10 +5228,7 @@ def _pair_cities_with_vibes(
                 _last_city_end = max(_last_city_end, city_positions[-1] + _m.end())
     _cities_then_vibes = bool(
         len(real_seq) >= 2 and _trailing_vibes and city_positions
-        # Never fire on a region-expanded trip, where some/all "positions"
-        # are the degenerate cursor fallback (no literal city token in the
-        # text at all) rather than real text positions — see
-        # city_positions_found above.
+        # Never fire on a region-expanded trip (degenerate cursor positions).
         and all(city_positions_found)
         and city_positions[-1] < min(
             vpos for vpos, vcanon in vibe_hits
@@ -5902,16 +5242,11 @@ def _pair_cities_with_vibes(
             )],
         )
     )
-    # fix-round-4: the MIRROR shape — "all vibes then all cities" ("we want
-    # culture and nightlife: Bangkok and Singapore") — was entirely
-    # unhandled. Every vibe precedes the FIRST city's position, so it falls
-    # before every city's forward window (pos < vpos < next_pos never
-    # matches), the explicit vibe->city bind only fires when a vibe sits
-    # textually adjacent to a city token, and _cities_then_vibes's guard is
-    # the exact opposite ordering — so every leg's vibe was silently dropped
-    # with no clarification. Same proportional Nth-city-takes-Nth-vibe
-    # pairing as _cities_then_vibes above, just triggered by the reversed
-    # ordering check.
+    # The MIRROR shape — "all vibes then all cities" ("we want culture and
+    # nightlife: Bangkok and Singapore"). Every vibe precedes the FIRST city's
+    # position, so it falls outside every city's forward window; same proportional
+    # Nth-city-takes-Nth-vibe pairing as _cities_then_vibes above, triggered by the
+    # reversed ordering check.
     _vibes_then_cities = bool(
         len(real_seq) >= 2 and _trailing_vibes and city_positions
         and all(city_positions_found)
@@ -5925,26 +5260,18 @@ def _pair_cities_with_vibes(
     for i, (slug, pos) in enumerate(zip(real_seq, city_positions)):
         next_pos = city_positions[i + 1] if i + 1 < len(city_positions) else len(lowered) + 1
         vibe = None
-        # fix-round-2: an explicit binding for THIS city is checked FIRST, before
-        # the forward-window scan below — it may sit anywhere in the text (commonly
-        # BEFORE its own position — "relaxing Hanoi", or a trailing "beach in Bali"
-        # clause written after every city was listed). Previously the forward-window
-        # scan ran first and only skipped a vibe bound to a DIFFERENT city; it never
-        # checked whether THIS city had its own explicit binding elsewhere that
-        # should take precedence, so an unbound vibe sitting in this city's forward
-        # window was greedily grabbed FIRST, silently discarding this city's own
-        # explicit "<vibe> <City>" binding and mislabeling the leg.
+        # An explicit binding for THIS city is checked FIRST, before the forward-
+        # window scan below — it may sit anywhere in the text (commonly BEFORE its
+        # own position — "relaxing Hanoi", or a trailing "beach in Bali" clause).
         for vpos, vcanon in vibe_hits:
             if (_explicit_bind_vpos_to_city.get(vpos) == slug
                     and vcanon not in claimed_vibes and vcanon not in _used_vibes):
                 vibe = vcanon
                 break
         if vibe is None and (_cities_then_vibes or _vibes_then_cities):
-            # fix-round-3: proportional trailing-vibe-list pairing (see above) —
-            # deliberately does NOT consult `_used_vibes`, since re-using the
-            # same vibe across two positionally-mapped cities (when there are
-            # fewer vibes than cities) is the CORRECT behaviour here, not a
-            # re-grab bug.
+            # Proportional trailing-vibe-list pairing (see above) — deliberately does
+            # NOT consult `_used_vibes`, since re-using the same vibe across two
+            # positionally-mapped cities (fewer vibes than cities) is correct here.
             _vidx = i * len(_trailing_vibes) // len(real_seq)
             if _vidx < len(_trailing_vibes):
                 vibe = _trailing_vibes[_vidx]
@@ -5952,15 +5279,13 @@ def _pair_cities_with_vibes(
             for vpos, vcanon in vibe_hits:
                 if not (pos < vpos < next_pos):
                     continue
-                # fix-round-1: never re-hand out a vibe a previous leg already took —
-                # the LAST city's window spans to end-of-text and would otherwise
-                # greedily re-grab the trip's FIRST vibe hit even after it was used.
+                # Never re-hand out a vibe a previous leg already took — the LAST
+                # city's window spans to end-of-text and would otherwise greedily
+                # re-grab the trip's FIRST vibe hit even after it was used.
                 if vcanon in claimed_vibes or vcanon in _used_vibes:
                     continue
-                # fix-round-1: a vibe explicitly bound to a DIFFERENT city (see above)
-                # is reserved for that city, even though it falls inside THIS city's
-                # window ("a relaxing Hanoi trip then ... beach in Da Nang" — "beach"
-                # sits inside Hanoi's window but is reserved for Da Nang).
+                # A vibe explicitly bound to a DIFFERENT city (see above) is reserved
+                # for that city, even though it falls inside THIS city's window.
                 _bound_to = _explicit_bind_vpos_to_city.get(vpos)
                 if _bound_to is not None and _bound_to != slug:
                     continue
