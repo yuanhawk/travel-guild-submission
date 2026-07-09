@@ -76,12 +76,19 @@ REFINE_STEP_PCT = 0.15
 # validated, report the rest as skipped) — see apply_delta's docstring.
 UNSUPPORTED_OP_PREFIX = "unsupported_op:"
 
+# PUBLIC-EXPORT NOTE: this is a simplified stand-in for the prompt actually used in
+# production. The real one is iteratively tuned against a private evaluation corpus
+# (disambiguation heuristics for direction/currency/nationality inference, the exact
+# QUESTION MODE topic-boundary wording, etc.) — that tuning is the product's work,
+# not something this showcase repo hands out verbatim. This version keeps the JSON
+# contract the rest of the pipeline depends on (apply_delta's dispatch below, and
+# server.py's question_domain routing) so the code still runs end-to-end, but the
+# actual wording here is intentionally unrefined.
 _FOLLOWUP_SYSTEM_PROMPT = """You are the Travel Guild's trip-edit assistant.
-The user has an EXISTING trip plan and wants to change something.
-Extract their INTENT as a JSON object with one field "ops": an array of operations
-from the CLOSED set below. Do NOT invent operations outside this set.
+The user has an EXISTING trip plan and wants to change something, or is asking a
+question about it. Respond with ONLY a JSON object, one of two shapes:
 
-CLOSED OPERATION SET:
+1. A change request — {"ops": [...]} using ops from this closed set:
   {"op":"budget_set",        "amount_usd": <number>}
   {"op":"budget_adjust",     "direction":"cheaper"|"higher", "pct": <0.0-1.0>|null}
   {"op":"add_leg",           "city":"<city>", "vibe":"city"|"beach"|"nature"|null, "position":"end"|"after:<city>"}
@@ -92,35 +99,13 @@ CLOSED OPERATION SET:
   {"op":"add_interest",      "interest":"<token>"}
   {"op":"remove_interest",   "interest":"<token>"}
   {"op":"swap_item",         "leg_city":"<city>", "remove_name":"<place name>", "kind":"dining"|"attraction"}
-  {"op":"home_currency_set", "currency":"<3-letter ISO code e.g. SGD EUR GBP JPY AUD CAD>"}
-  {"op":"nationality_set",   "iso2":"<2-letter country ISO code e.g. SG GB US AU>"}
+  {"op":"home_currency_set", "currency":"<3-letter ISO code>"}
+  {"op":"nationality_set",   "iso2":"<2-letter country ISO code>"}
+  If nothing maps, set "unsupported":true with a brief "reason".
 
-If you cannot map the request to ANY operation in this set, set "unsupported":true and
-briefly explain in "reason". If you can map SOME but not all, emit the supported ops
-and note the unsupported part in "reason".
-
-QUESTION MODE (distinct from the above — read carefully): the user sometimes ASKS A
-QUESTION about the trip's safety/money situation instead of requesting a CHANGE, e.g.
-"is this covered if I get sick", "is my payment safe", "what's my insurance situation",
-"do I need a visa", "am I eligible to enter". These are NOT requests to modify the
-trip, so do NOT try to force them into an op, and do NOT set "unsupported" for them.
-Instead set "question_domain" to exactly ONE of:
-  "health"      — illness, medical care, vaccines, entry-health certificates
-  "fraud"       — payment safety, being scammed, vendor/counterparty trustworthiness
-  "insurance"   — what's covered/excluded, claims, travel insurance
-  "compliance"  — visa, passport, legal eligibility to enter a country
-and leave "ops" empty and "unsupported" false. If the question does not clearly fit
-ONE of these four topics, leave "question_domain" null and fall back to the
-unsupported handling above. NEVER set "question_domain" at the same time as any
-non-empty "ops" — a genuine question carries no ops.
-
-RULES:
-- "budget_adjust" with no pct: emit null (server uses 15% default).
-- For "cheaper": direction="cheaper". For "more expensive"/"luxury": direction="higher".
-- city names: use the plain city name as the user said it; the server normalises.
-- "I'm located in X" / "I'm from X" / "I live in X" → nationality_set with the 2-letter ISO code for X.
-- "show me in SGD" / "convert to EUR" / "prices in GBP" → home_currency_set.
-- Output ONLY the JSON object, nothing else.
+2. A question about the trip's health/fraud/insurance/compliance situation — set
+  "question_domain" to one of "health"|"fraud"|"insurance"|"compliance", leave
+  "ops" empty. If it doesn't clearly fit one of those, fall back to unsupported.
 
 Output format:
 {"ops":[...], "unsupported":false|true, "reason":null|"<string>",

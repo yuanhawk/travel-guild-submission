@@ -195,8 +195,15 @@ DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 _RANKING_MODEL = os.environ.get("SOCIETY_LLM_MODEL", "qwen3-max")  # cheap model for test sweeps
 
-# (public showcase repo: generic placeholder for the tuned production prompt --
-# see the note in destination_agent.py's _LLM_SYSTEM_PROMPT. Schema unchanged.)
+# PUBLIC-EXPORT NOTE: this is a simplified stand-in for the prompt actually used in
+# production. The real one is iteratively tuned against a private evaluation corpus
+# (disambiguation heuristics between similar lodging types/star tiers, worked
+# ranking examples, edge-case guidance for sparse or ambiguous candidate sets,
+# etc.) — that tuning is the product's work, not something this showcase repo
+# hands out verbatim. This version keeps the JSON contract the rest of the
+# pipeline depends on (_llm_rank_hotels' response parsing and _clamp_ranking's
+# variance clamp below) so the code still runs end-to-end, but the actual
+# wording here is intentionally unrefined.
 _RANKING_SYSTEM_PROMPT = """Rank the given candidate hotel IDs best-to-worst for the traveller's vibe/preference, using each candidate's lodging_type as a signal.
 
 Output ONLY valid JSON: {"ranked_ids": [<hotel_id string>, ...]}. Include every provided ID exactly once, no invented IDs, no other fields -- ranking is a preference hint only, budget is enforced separately.

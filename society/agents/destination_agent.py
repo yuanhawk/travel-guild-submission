@@ -386,12 +386,14 @@ def parse_area_from_hotel_id(
 # LLM call.  Output is validated against both the city closed set AND the strict
 # vibe set; anything outside is dropped.  The LLM cannot expand the set.
 
-# (public showcase repo: this prompt is a generic placeholder for the tuned
-# production prompt, which is withheld as it's judged to be part of the
-# competitive prompt-engineering surface, per this repo's stated redaction
-# policy -- see README.md. The JSON schema/contract below is unchanged, so
-# the LLM-on ranking edge still behaves identically; only the wording that
-# was iterated on privately for ranking quality is generic here.)
+# PUBLIC-EXPORT NOTE: this is a simplified stand-in for the prompt actually used in
+# production. The real one is iteratively tuned against a private evaluation corpus
+# (disambiguation heuristics between similar-vibe areas, worked ranking examples,
+# edge-case guidance for sparse/ambiguous catalog entries, etc.) — that tuning is
+# the product's work, not something this showcase repo hands out verbatim. This
+# version keeps the JSON contract the rest of the pipeline depends on
+# (_parse_llm_response and _clamp_areas below) so the code still runs end-to-end,
+# but the actual wording here is intentionally unrefined.
 _LLM_SYSTEM_PROMPT = """Rank the given areas best-to-worst for the requested vibe, choosing only from the provided allowed_areas list.
 
 Output ONLY valid JSON: {"areas": [<area string>, ...]}. Use only allowed_areas values (exact spelling), best-first order, no invented areas, no other fields.
