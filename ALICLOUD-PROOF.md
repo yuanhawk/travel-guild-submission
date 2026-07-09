@@ -144,7 +144,7 @@ The Qwen model served through the runtime container pulls from DashScope via `DA
 
 - `DASHSCOPE_API_KEY` is read from the environment; see `society/utils/model_router.py` and `society/utils/intent_parser.py` for the read sites (env var name only, never a value).
 - **Live deployment, verifiable directly:** `curl https://api-staging.itinerario.io/health` returns `{"status":"ok","society":"ready","git_sha":"<commit>"}` from `society/orchestration/server.py`'s `/health` handler — a judge can hit this URL right now and see a real, currently-running backend respond, not a static claim.
-- A cloud-console screenshot was considered as evidence but is deliberately not shipped, even redacted: any capture of live infrastructure carries residual risk not worth taking in a public repo. See SECURITY-ADVISORY.md #10 for the full incident writeup — an earlier version leaked real infra identifiers, was redacted, and was then removed entirely; its git history was rewritten so no version of it (redacted or not) remains reachable from this repo.
+- A cloud-console screenshot was considered as evidence but is deliberately not shipped, even redacted: any capture of live infrastructure carries residual risk not worth taking in a repo that will eventually go public. See SECURITY-ADVISORY.md #10 for the full writeup — an earlier version contained real infra identifiers (this repo has always been private, so it was never externally exposed); it was redacted, then removed entirely, and its git history was rewritten so no version of it remains reachable from this repo.
 
 ---
 
