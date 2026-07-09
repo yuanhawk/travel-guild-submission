@@ -143,7 +143,7 @@ The Qwen model served through the runtime container pulls from DashScope via `DA
 ### Evidence
 
 - `DASHSCOPE_API_KEY` is read from the environment; see `society/utils/model_router.py` and `society/utils/intent_parser.py` for the read sites (env var name only, never a value).
-- Screenshot of the live ECS instance's console page (Instance ID `i-t4n44gbij7622v7ecow4`, Status: Running, Zone: Singapore D, matching VPC/vSwitch bindings used throughout this proof):
+- Screenshot of the live ECS instance's console page (Instance ID `i-t4n44gbij7622v7ecow4`, Status: Running, Zone: Singapore D, matching VPC/vSwitch bindings used throughout this proof): [`docs/alicloud-deployment-proof.png`](https://github.com/yuanhawk/travel-guild-submission/blob/main/docs/alicloud-deployment-proof.png)
 
   ![AliCloud ECS instance running](docs/alicloud-deployment-proof.png)
 
