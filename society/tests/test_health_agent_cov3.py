@@ -64,18 +64,23 @@ def _send_skill(client: TestClient, skill_id: str, data: dict) -> dict:
 
 
 # ===========================================================================
-# 1. _build_city_to_slate_key() exception handlers (lines 3041-3042)
+# 1. _build_city_to_slate_key() graceful-degradation (#109 rewrite)
 # ===========================================================================
 
-def test_build_city_to_slate_key_missing_catalog():
-    """3041-3042: OSError opening the catalog → empty dict, no raise."""
-    with mock.patch("builtins.open", side_effect=OSError("catalog not found")):
-        assert health._build_city_to_slate_key() == {}
-
-
-def test_build_city_to_slate_key_invalid_json():
-    """3041-3042: malformed JSON catalog → JSONDecodeError caught → empty dict."""
-    with mock.patch("builtins.open", mock.mock_open(read_data="{ not valid json")):
+def test_build_city_to_slate_key_empty_city_to_iso2():
+    """
+    #109: _build_city_to_slate_key() no longer reads catalog.json directly — it
+    is COMPOSED from intent_parser.CITY_TO_ISO2 (the same city→country table used
+    to set each leg's dest_country) and this module's own ISO2→slate-key table,
+    so this fallback map can never disagree with dest_country on a city-name
+    collision (e.g. "Salem" — India vs United States in catalog.json).
+    CITY_TO_ISO2 itself is loaded once at import time and already has its own
+    OSError/JSONDecodeError → {} fallback (see intent_parser._load_city_to_iso2);
+    verify the composition still degrades gracefully to {} — no raise — when
+    that upstream table is empty (the equivalent "catalog unreadable" scenario
+    under the new architecture).
+    """
+    with mock.patch("utils.intent_parser.CITY_TO_ISO2", {}):
         assert health._build_city_to_slate_key() == {}
 
 

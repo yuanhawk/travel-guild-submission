@@ -188,6 +188,18 @@ ALLOWED_CITIES, _SPACE_FORM_SLUGS, _CATALOG_COUNTRIES = _load_catalog_cities()
 _CATALOG_COUNTRY_COUNT: int = len(_CATALOG_COUNTRIES) or 168  # fallback if catalog unreadable
 
 
+def _ascii_fold_city(city: str) -> str:
+    """
+    #52 root-cause fix: fold a lowercased city name to its plain-ASCII form
+    (NFKD decompose + drop combining marks), e.g. 'bogotá' -> 'bogota',
+    'kraków' -> 'krakow', 'nîmes' -> 'nimes'. Defined here (ahead of
+    _load_city_to_iso2, which runs at module load) rather than reusing the
+    similar-purpose _fold_accents further down the file, which is not yet
+    defined at that point in module execution order.
+    """
+    return unicodedata.normalize("NFKD", city).encode("ascii", "ignore").decode("ascii")
+
+
 def _load_city_to_iso2() -> dict[str, str]:
     """
     Build a deterministic city (lowercase) → ISO-3166 alpha-2 map from the catalog
@@ -196,6 +208,11 @@ def _load_city_to_iso2() -> dict[str, str]:
 
     Falls back silently to empty dict if either file is unreadable — the gate will
     then see no dest_country and emit an unverified FLAG (never a silent pass).
+
+    #52: EVERY resolved city is indexed under BOTH its exact (lowercased) catalog
+    spelling AND its plain-ASCII fold (when they differ) — this is the root-cause
+    fix for the diacritic-mismatch gap: a traveler typing the unaccented form of
+    an accented catalog city (by far the common case) now still resolves.
     """
     catalog_path = os.path.join(os.path.dirname(__file__), "..", "..", "ucp-merchant", "catalog.json")
     iso2_path = os.path.join(os.path.dirname(__file__), "..", "..", "reference", "country_name_to_iso2.json")
@@ -218,6 +235,18 @@ def _load_city_to_iso2() -> dict[str, str]:
         iso2 = name_to_iso2.get(country_name)
         if iso2:
             city_to_iso2.setdefault(city, iso2)
+            # #52 root-cause fix: also index this city under its plain-ASCII fold
+            # (NFKD decompose + drop combining marks), e.g. 'bogotá' -> 'bogota'.
+            # Every CITY_TO_ISO2 lookup site does a plain `.get(city.strip().lower())`
+            # — before this fix, a catalog city seeded WITH a diacritic (the catalog's
+            # own spelling) silently failed to resolve against the overwhelmingly-common
+            # ASCII-only way travelers actually type a destination, which then silently
+            # dropped that leg out of the health/compliance dest_country gate entirely.
+            # setdefault so the catalog's own exact spelling always wins a same-key
+            # collision (deterministic, catalog-order).
+            folded = _ascii_fold_city(city)
+            if folded and folded != city:
+                city_to_iso2.setdefault(folded, iso2)
         else:
             unresolved.append(f"{city!r}({country_name!r})")
     if unresolved:
@@ -229,6 +258,87 @@ def _load_city_to_iso2() -> dict[str, str]:
 
 
 CITY_TO_ISO2: dict[str, str] = _load_city_to_iso2()
+
+
+def _load_country_name_to_iso2() -> dict[str, str]:
+    """reference/country_name_to_iso2.json, keyed lower-cased for a case-
+    insensitive lookup (the SAME file _load_city_to_iso2 reads above). Empty
+    dict if unreadable — see normalize_country_to_iso2's fail-conservative
+    contract."""
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "reference", "country_name_to_iso2.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("intent_parser: country_name_to_iso2.json unreadable for "
+                        "normalize_country_to_iso2 (%s)", e)
+        return {}
+    return {
+        k.strip().lower(): v.strip().upper()
+        for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+    }
+
+
+def _load_iso3_to_iso2() -> dict[str, str]:
+    """reference/iso2_to_iso3.json (standard ISO 3166-1 alpha-2 -> alpha-3),
+    inverted to alpha-3 -> alpha-2. Empty dict if unreadable."""
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "reference", "iso2_to_iso3.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        logger.warning("intent_parser: iso2_to_iso3.json unreadable for "
+                        "normalize_country_to_iso2 (%s)", e)
+        return {}
+    return {
+        v.strip().upper(): k.strip().upper()
+        for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+    }
+
+
+_COUNTRY_NAME_TO_ISO2: dict[str, str] = _load_country_name_to_iso2()
+_ISO3_TO_ISO2: dict[str, str] = _load_iso3_to_iso2()
+
+
+def normalize_country_to_iso2(value: Any) -> str:
+    """
+    THE canonical normalizer for a country REFERENCE — ISO-3166 alpha-2
+    ("AF"), alpha-3 ("AFG"), or a full country name ("Afghanistan"), in any
+    case / with surrounding whitespace — to its upper-cased ISO2 code.
+
+    Any gate keyed on ISO2 (contracts.DO_NOT_RECOMMEND_COUNTRIES membership,
+    etc.) should normalize a caller-supplied country reference through THIS
+    function first, rather than re-deriving a parallel ISO3/name lookup
+    elsewhere — it is the single authority, reusing the SAME
+    reference/country_name_to_iso2.json every other ISO2 lookup in this
+    codebase already reads (CITY_TO_ISO2 above), plus reference/iso2_to_iso3.json
+    for the alpha-3 case.
+
+    Fail-conservative: an unrecognized string is returned upper-cased/
+    stripped UNCHANGED (never dropped/blanked) — it simply won't match a
+    strict ISO2 set, the same "not a member" outcome an unrecognized code
+    already produced before this normalizer existed. Non-string / empty
+    input returns "".
+    """
+    if not isinstance(value, str):
+        return ""
+    s = value.strip()
+    if not s:
+        return ""
+    upper = s.upper()
+    if len(upper) == 2:
+        return upper
+    if len(upper) == 3:
+        iso2 = _ISO3_TO_ISO2.get(upper)
+        if iso2:
+            return iso2
+    by_name = _COUNTRY_NAME_TO_ISO2.get(s.lower())
+    if by_name:
+        return by_name
+    return upper
+
 
 # Free-text city name → catalog city slug. Auto-generated space-forms for
 # hyphenated catalog slugs, plus the manual "kl" abbreviation.
@@ -1924,7 +2034,14 @@ def _clamp_and_validate(
                 out_leg["interests"] = _raw_interests
             if _raw_interest_map:
                 out_leg["interest_map"] = _raw_interest_map
-            iso2 = CITY_TO_ISO2.get(city)
+            # #87/#92: an EXPLICIT dest_country from the structured caller (threaded
+            # through by parse_intent_bypass) is authoritative and must win over a
+            # CITY_TO_ISO2 catalog guess from the bare city name — a guess can
+            # collide across countries (e.g. 'victoria' -> CITY_TO_ISO2 'HK' vs an
+            # explicit Seychelles request). CITY_TO_ISO2 is consulted only as a
+            # fallback when dest_country is absent/empty (the #70 case).
+            _explicit_dest_country = str(leg_dict.get("dest_country") or "").strip().upper()
+            iso2 = _explicit_dest_country or CITY_TO_ISO2.get(city)
             if iso2:
                 out_leg["dest_country"] = iso2
             validated_legs.append(out_leg)
@@ -1985,15 +2102,15 @@ def _clamp_and_validate(
         "assumed_start_date": start_anchor if _assumed_start_date else None,
         # fix-round-3: when a start date WAS assumed, distinguish "the user
         # said nothing about timing at all" from "the user stated a SEASON/
-        # HOLIDAY (e.g. 'this summer', 'around Christmas') that the
-        # deterministic scanner cannot resolve to a specific calendar date".
-        # None whenever no season/holiday word is present, or no date was
-        # assumed at all — attach_assumption_notes uses this to word the
-        # honesty note accurately instead of flatly contradicting the user.
+        # HOLIDAY (e.g. 'this summer', 'around Christmas') — or (#52 item 6c) a
+        # generic VAGUE-BUT-PRESENT timing phrase ('sometime next year', 'later
+        # this year') — that the deterministic scanner cannot resolve to a
+        # specific calendar date. None whenever neither kind of hint is
+        # present, or no date was assumed at all — attach_assumption_notes
+        # uses this to word the honesty note accurately instead of flatly
+        # (and falsely) contradicting a user who DID say something about timing.
         "assumed_start_date_season_hint": (
-            _SEASON_HOLIDAY_HINT_RE.search(original_text).group(0).lower()
-            if _assumed_start_date and _SEASON_HOLIDAY_HINT_RE.search(original_text)
-            else None
+            _date_vague_hint(original_text) if _assumed_start_date else None
         ),
         # #honesty-fix (GAP 1, silent-default-provenance): same pattern for party size — None on
         # every caller/fixture that already states a traveler count (explicitly or via a
@@ -2215,6 +2332,36 @@ _SEASON_HOLIDAY_HINT_RE = re.compile(
     re.I,
 )
 
+# #52 item 6c — same honesty gap as the season/holiday hint above, but for a
+# VAGUE-BUT-PRESENT date phrase that names no season/holiday at all ("sometime
+# next year", "later this year", "in a few months"). Before this fix, such a
+# phrase satisfied NEITHER the season/holiday regex NOR the exact-date scanner,
+# so it fell all the way through to the flatly FALSE "No travel dates were
+# given" note despite the user having stated (vague) timing. Checked ALONGSIDE
+# _SEASON_HOLIDAY_HINT_RE at the assumed_start_date_season_hint call site (see
+# _clamp_and_validate) — either one being present is enough to word the note
+# honestly instead of contradicting the user.
+_VAGUE_TIMING_HINT_RE = re.compile(
+    r"\bsometime(?:\s+(?:soon|next\s+year|this\s+year))?\b|"
+    r"\bnext\s+year\b|\blater\s+this\s+year\b|"
+    r"\bin\s+(?:a\s+)?(?:few|couple(?:\s+of)?)\s+months\b",
+    re.I,
+)
+
+
+def _date_vague_hint(text: str) -> str | None:
+    """The matched season/holiday OR generic-vague-timing phrase in *text*, or
+    None if neither is present. Checks _SEASON_HOLIDAY_HINT_RE first (a season/
+    holiday word is the more specific/informative hint) then falls back to
+    _VAGUE_TIMING_HINT_RE (#52 item 6c). Pure / deterministic."""
+    m = _SEASON_HOLIDAY_HINT_RE.search(text)
+    if m:
+        return m.group(0).lower()
+    m = _VAGUE_TIMING_HINT_RE.search(text)
+    if m:
+        return m.group(0).lower()
+    return None
+
 
 def _connective_verb_spans(lowered: str) -> list[tuple[int, int]]:
     """
@@ -2296,12 +2443,32 @@ _NEGATION_CUE_RE = re.compile(
     r"|not\s+(?:going|travel(?:l)?ing|heading|flying|driving)\s+to"
     r"|not\s+visiting"
     r"|not\s+want(?:ing)?\s+to\s+(?:go|travel(?:l)?|head|fly|drive)\s+to"
+    # BUG 2 fix (round-2): a bare, VERBLESS "not <City>" ("Rome but not
+    # Paris", "I want Rome, not Paris", "somewhere in Europe, not Tokyo")
+    # has no verb phrase at all, so none of the "not going to"/"not
+    # visiting"/"not wanting to go to" alternatives above ever matched it —
+    # the negated city fell through and was booked as a real leg. This
+    # generic fallback MUST stay listed last within this group (Python's re
+    # alternation takes the first alternative that matches at a given
+    # position, not the longest), so every more specific "not <verb phrase>"
+    # alternative above still gets first refusal and this bare form only
+    # ever fires when none of them do. Still adjacency-matched via
+    # _CITY_RE.match right after the cue (no loose window), and still
+    # subject to _DOUBLE_NEGATION_GUARD_RE below ("don't skip" / "won't
+    # avoid" style double negation), same safety discipline as every other
+    # alternative here.
+    r"|not"
     r"|never\s+(?:going|travel(?:l)?ing|heading|flying|driving)\s+to"
     r"|never\s+visiting"
     r")"
     r"|n't\s+(?:be\s+)?(?:going|travel(?:l)?ing|heading|flying|driving)\s+to"
     r"|n't\s+visiting"
     r"|n't\s+want(?:ing)?\s+to\s+(?:go|travel(?:l)?|head|fly|drive)\s+to"
+    # BUG 2 fix (round-2): the bare-contraction counterpart of the bare
+    # "not" fallback above ("it isn't Paris, it's Rome") — same
+    # last-alternative-in-the-group discipline so the specific "n't going
+    # to"/"n't visiting"/"n't wanting to go to" forms above still win first.
+    r"|n't"
     r")\s*",
     re.I,
 )
@@ -2960,6 +3127,52 @@ def _scan_city_sequence_spans(text: str) -> list[tuple[int, int, str]]:
     if not hits and _origin_hits and _STAYCATION_SIGNAL_RE.search(text):
         hits = _origin_hits
 
+    # #52 item 6a — mirror the COUNTRY-level "<Country> or <Country>" disjunction
+    # gate (_substitute_country_with_city's "opus-round-4" check, above) at the
+    # CITY level. That gate already declines rather than silently picking the
+    # first-named country when the traveler hasn't decided between two options;
+    # this scanner had NO equivalent check, so "Bali or Tokyo" silently became a
+    # byte-identical TWO-CITY itinerary (both legs booked) instead of asking
+    # which one — then any downstream failure (e.g. an unrelated transport
+    # infeasibility) surfaced as the wrong root cause. Drop BOTH spans of any
+    # adjacent city-hit pair joined by a bare "or" so neither resolves as a
+    # destination — this falls through to the SAME honest "no destination
+    # found" decline the country-level gate already relies on.
+    if len(hits) >= 2:
+        _ordered = sorted(hits, key=lambda h: h[0])
+        _or_drop: set[tuple[int, int]] = set()
+        for _i in range(len(_ordered) - 1):
+            (s1, e1, _slug1), (s2, e2, _slug2) = _ordered[_i], _ordered[_i + 1]
+            if re.match(r"^\s*,?\s*or\s+$", lowered[e1:s2]):
+                _or_drop.add((s1, e1))
+                _or_drop.add((s2, e2))
+                # BUG 3 fix (round-2): an OXFORD-COMMA list ("Tokyo, Kyoto,
+                # or Osaka") only spells "or" in its LAST separator — every
+                # earlier separator is a bare comma ("Tokyo, Kyoto, ..."),
+                # so only the adjacent pair touching the literal word "or"
+                # (Kyoto/Osaka) matched above, while the FIRST city in the
+                # list (Tokyo) was never marked for dropping and stayed a
+                # silently committed, booked destination — the opposite of
+                # this block's own "decline and ask" intent for an
+                # undecided-between-options request. Walk BACKWARD from this
+                # or-pair through any unbroken run of bare-comma-only
+                # separators and fold those earlier hits into the drop set
+                # too, so the whole disjunctive list drops together. Stops
+                # at the first separator that is neither a bare comma nor
+                # "or" (e.g. "then"), so an unrelated EARLIER destination
+                # named before the list is never swept in by mistake.
+                _j = _i
+                while _j > 0:
+                    (ps, pe, _pslug) = _ordered[_j - 1]
+                    (cs, ce, _cslug) = _ordered[_j]
+                    if re.match(r"^\s*,\s*$", lowered[pe:cs]):
+                        _or_drop.add((ps, pe))
+                        _j -= 1
+                    else:
+                        break
+        if _or_drop:
+            hits = [h for h in hits if (h[0], h[1]) not in _or_drop]
+
     hits.sort(key=lambda h: h[0])
     return hits
 
@@ -3234,8 +3447,21 @@ def _scan_unknown_place_spans(text: str) -> list[tuple[str, int, int]]:
     )
     _PERSON_PRECEDING_CUE_RE = re.compile(r"\bpropos\w*\s*$", re.I)
     spans: list[tuple[str, int, int]] = []
-    for m in re.finditer(rf"{cue}\s+({place})", text):
-        tok = m.group(1)
+    # BUG 1 fix (round-2): `place` is an ASCII-only character class, so a
+    # genuinely-UNSUPPORTED city name containing a diacritic ("Świnoujście")
+    # never even matched as a place-shaped candidate — it was silently
+    # invisible to the whole dropped-legs/honesty-notice mechanism below,
+    # unlike its ASCII counterparts. Mirrors the same same-length
+    # accent-fold trick already used by _scan_city_sequence_spans: match
+    # against an ASCII-folded view of *text* (so the regex itself never has
+    # to grow a Unicode-aware character class, avoiding the regression risk
+    # the BUG-3-fix comment above already called out), then read the actual
+    # token back out of the ORIGINAL text via the same char offsets
+    # (``_fold_accents`` is same-length, so offsets still line up) so the
+    # diacritic spelling is preserved in the dropped-legs notice.
+    _folded_text = _fold_accents(text)
+    for m in re.finditer(rf"{cue}\s+({place})", _folded_text):
+        tok = text[m.start(1):m.end(1)]
         # BUG 3: yield to a span already resolved as a real catalog city — do not
         # flag a mangled fragment of it ("Ho Chi" of "Ho Chi Minh City") as unknown.
         if _overlaps_resolved(m.start(1), m.end(1)):
@@ -4638,15 +4864,26 @@ def _scan_adults_raw(text: str) -> int | None:
     # companion = 2 adults. Checked AFTER every numeric pattern above so an explicit
     # count ("3 adults including my wife") always wins over this inference — this only
     # fires when the text carries no numeric party-size signal at all.
-    if re.search(rf"\bmy\s+{_COMPANION_WORDS_RE}\b", lowered):
-        return 2
     # "husband and I" / "my sister and I" (#202/party-07) — same companion-word
     # semantics as the "my <companion>" check above, but without requiring the "my"
     # possessive immediately before the word. Anchored tightly to "<companion-word>
     # and i" so unrelated "X and I" phrasing ("waiting and I think...") never matches —
     # the word directly before "and I" must itself be one of the closed companion words.
-    if re.search(rf"\b{_COMPANION_WORDS_RE}\s+and\s+i\b", lowered):
-        return 2
+    # BUG 4 fix (round-2): both checks used to unconditionally `return 2` on the
+    # FIRST companion-word match, regardless of how many DISTINCT companions were
+    # actually named ("with my wife and my sister" is speaker + 2 = 3, not 2).
+    # Collect every distinct companion word matched by EITHER pattern (deduped by
+    # word, so "my sister ... sister and I" naming the same relation twice still
+    # counts as one person) and return 1 (the implicit speaker) + that count —
+    # mirrors how _N_COUPLES_RE above multiplies by the stated N rather than
+    # hardcoding a single couple's worth.
+    _companions: set[str] = set()
+    for _cm in re.finditer(rf"\bmy\s+({_COMPANION_WORDS_RE})\b", lowered):
+        _companions.add(_cm.group(1))
+    for _cm in re.finditer(rf"\b({_COMPANION_WORDS_RE})\s+and\s+i\b", lowered):
+        _companions.add(_cm.group(1))
+    if _companions:
+        return 1 + len(_companions)
     return None
 
 
@@ -6711,6 +6948,14 @@ def parse_intent_bypass(structured_request: dict) -> dict:
             raw_leg["checkin"] = leg["checkin"]
         if "checkout" in leg:
             raw_leg["checkout"] = leg["checkout"]
+        # #92 — thread an explicit caller-supplied dest_country through, same as
+        # city/checkin/checkout above. Without this, a structured caller stating
+        # dest_country='sc' (Seychelles) with city='victoria' had it silently
+        # dropped here, and the clamp's bypass branch re-derived dest_country
+        # purely from CITY_TO_ISO2.get('victoria') == 'HK' — the same
+        # wrong-country class of bug fixed for the non-bypass path in #87.
+        if "dest_country" in leg:
+            raw_leg["dest_country"] = leg["dest_country"]
         # adults per-leg is absorbed by the top-level adults field in clamp
         raw["legs"].append(raw_leg)
 
@@ -6726,6 +6971,11 @@ def parse_intent_bypass(structured_request: dict) -> dict:
         }
 
     validated["user_id"] = user_id
+    # #54 — pass a structured overland_only/no_fly flag straight through (bool-coerced).
+    # Absent when the caller didn't supply one → orchestrator/_request_digest's own
+    # `.get(..., False)` default applies, byte-identical to pre-#54 behaviour.
+    if "overland_only" in structured_request:
+        validated["overland_only"] = bool(structured_request["overland_only"])
     return validated
 
 
@@ -6751,6 +7001,30 @@ def _scan_persona(text: str) -> str:
     "default". Deterministic regex (var-0 for a given input). The transport gate maps "comfort" to a
     wider rail-preference range; everything else is unchanged. Hook for the fuller persona model (#35)."""
     return "comfort" if _COMFORT_CUES.search(text or "") else "default"
+
+
+# #54 (follow-up to #51) — explicit no-fly / overland-only cues. Deliberately a SEPARATE, STRICTER
+# pattern from _COMFORT_CUES: "prefer the train"/"by train"/"avoid flying"/"overland" (bare) are soft
+# PREFERENCES that only widen the rail-preference range (persona="comfort") — the trip can still book
+# a flight when no overland option exists. These cues below are unambiguous HARD constraints ("no
+# flights", "overland only", "surface only", "can't fly") — the traveller stating one of these means
+# the Transport gate must REJECT a leg pair whose only option is a flight, not just prefer around it.
+# No overlap with _COMFORT_CUES's bare "overland"/"by train"/"avoid flying" phrasing, so an existing
+# soft-preference request is untouched (still persona="comfort" only, overland_only stays False).
+_NO_FLY_CUES = re.compile(
+    r"\b(no flying|no flights?|without (?:any )?flying|without (?:taking )?(?:a |any )?flights?|"
+    r"avoid (?:all |any )?flights?|no[- ]fly\b|overland[- ]only|surface(?: travel)?[- ]?only|"
+    r"(?:don't|do not|won't|will not|can't|cannot)(?: really)? (?:want to )?"
+    r"(?:fly|flying|take (?:a |any )?flights?)|"
+    r"no air travel|(?:by )?(?:train|bus|rail|ferry|boat)(?:s)? only)\b", re.I)
+
+
+def _scan_overland_only(text: str) -> bool:
+    """True iff the free text states an explicit, unambiguous no-fly / overland-only HARD
+    constraint (see ``_NO_FLY_CUES``), else False. Deterministic regex (var-0 for a given
+    input). Feeds ``trip_request["overland_only"]``, which the Transport gate (#54) uses to
+    REJECT (not silently allow) any leg pair whose only resolvable option is a flight."""
+    return bool(_NO_FLY_CUES.search(text or ""))
 
 
 def build_estimate_request(
@@ -7048,6 +7322,7 @@ def negotiate_from_text(
     merchant_user_id: str | None = None,
     memory_verified_user_id: str | None = None,
     real_user_id: str | None = None,
+    overland_only: bool | None = None,
 ) -> dict:
     """
     Parse free text → validated request → orchestrator.negotiate().
@@ -7169,6 +7444,16 @@ def negotiate_from_text(
     # persona always wins. Deterministic (regex on the text) → var-0 for a given input.
     if "persona" not in req:
         req["persona"] = _scan_persona(free_text)
+    # #54 (follow-up to #51) — overland_only / no_fly HARD constraint. An explicit
+    # structured `overland_only` kwarg (server.py / API callers) always wins; otherwise
+    # fall back to the free-text no-fly scan (e.g. "no flights", "overland only", "by
+    # train only" — see _NO_FLY_CUES). A req["overland_only"] already set by an upstream
+    # structured caller (e.g. parse_intent_bypass) is never overwritten either way.
+    # Default False (no cue, no kwarg) is byte-identical to pre-#54 behaviour.
+    if overland_only is not None and req.get("overland_only") is None:
+        req["overland_only"] = overland_only
+    if "overland_only" not in req:
+        req["overland_only"] = _scan_overland_only(free_text)
     # #161 — canonical Go-merchant checkout owner, computed at the server boundary
     # (utils.ucp_signing.merchant_checkout_owner) from the RAW request BEFORE any
     # anon uuid4 stamp. Rides along on req like wallet_balance_cents/live_emergency

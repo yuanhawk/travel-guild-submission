@@ -453,6 +453,55 @@ class TestConsentGate:
 
 
 # ===========================================================================
+# Adversarial-test finding — non-string user_id crashed /negotiate with a bare
+# 500 instead of a clean 4xx. Every other top-level field (nationality,
+# total_budget_cents, wallet_balance_cents) already had an explicit type check;
+# user_id was the one gap, closed alongside this regression test.
+# ===========================================================================
+
+class TestNegotiateUserIdTypeValidation:
+    """POST /negotiate with a non-string user_id → clean 400, never a 500."""
+
+    @pytest.mark.parametrize("bad_user_id", [True, 12345, ["a", "b"], {"a": 1}])
+    def test_non_string_user_id_rejected_400(self, bad_user_id) -> None:
+        app = server.build_app()
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/negotiate", json={
+            "user_id": bad_user_id,
+            "total_budget_cents": 100000,
+            "legs": [],
+        })
+        assert resp.status_code == 400, (
+            f"Expected 400 for user_id={bad_user_id!r}, got {resp.status_code}: {resp.text[:200]}"
+        )
+        assert "user_id" in resp.json().get("detail", "")
+        print(f"PASS: test_non_string_user_id_rejected_400[{bad_user_id!r}]")
+
+    def test_string_user_id_still_accepted(self) -> None:
+        """Regression check: a normal string user_id must not be rejected."""
+        app = server.build_app()
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/negotiate", json={
+            "user_id": "demo-mei",
+            "total_budget_cents": 100000,
+            "legs": [],
+        })
+        assert resp.status_code != 400 or "user_id" not in resp.json().get("detail", "")
+        print("PASS: test_string_user_id_still_accepted")
+
+    def test_missing_user_id_still_accepted(self) -> None:
+        """Regression check: user_id is optional — omitting it must not be rejected."""
+        app = server.build_app()
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/negotiate", json={
+            "total_budget_cents": 100000,
+            "legs": [],
+        })
+        assert resp.status_code != 400 or "user_id" not in resp.json().get("detail", "")
+        print("PASS: test_missing_user_id_still_accepted")
+
+
+# ===========================================================================
 # Entry point for standalone runs
 # ===========================================================================
 
@@ -460,6 +509,7 @@ if __name__ == "__main__":
     classes = [
         TestBodySizeLimit, TestRateLimit, TestOptionalTokenAuth,
         TestSSRFValidation, TestSigningStrictMode, TestConsentGate,
+        TestNegotiateUserIdTypeValidation,
     ]
     for cls in classes:
         obj = cls()

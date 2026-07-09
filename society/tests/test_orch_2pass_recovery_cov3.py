@@ -666,6 +666,52 @@ def test_all_advisory_sources_aggregate_correctly():
 
 
 # ===========================================================================
+# #51/BUG8 — Split->Vis-shape repro: a critical transport feasibility caveat
+# (an unverified water crossing, internally feasible=False) must reach the SAME
+# top-level advisories list every other warning uses, even though the booking
+# itself still succeeds (the unverified edge does not hard-block per #70).
+# ===========================================================================
+
+def test_transport_unverified_edge_reaches_advisories():
+    """A trip whose only transfer is an unverified water crossing (Split->Vis shape)
+    books successfully (booking_ref present) but the feasibility caveat must NOT be
+    silently dropped — it must appear in result["advisories"], not just the
+    result["transport_unverified"] side-channel a front end may not render."""
+    orch = build_society()
+    trip = _base_trip()
+
+    unverified_edge = {
+        "from_leg": "leg-0", "to_leg": "leg-1",
+        "from_city": "split", "to_city": "vis",
+        "feasible": False, "unverified": True,
+        "mode": "water_crossing_unverified", "transfer_minutes": -1,
+        "reason": (
+            "unverified water crossing: 'split' -> 'vis' appears to require a "
+            "ferry/sea crossing but no known ferry route is seeded and no flight "
+            "connects them. Not assumed feasible — confirm a sailing before "
+            "relying on this leg."
+        ),
+    }
+    success = _canned_success()
+    success["transport_unverified"] = [unverified_edge]
+
+    with patch.object(orch, "_run_health_gate", return_value=None):
+        with patch.object(orch, "_run_compliance_gate", return_value=None):
+            with patch.object(orch, "_run_fraud_gate", return_value=None):
+                with patch.object(orch, "_assess_risk_signals", return_value=None):
+                    with patch.object(orch, "_negotiate_dp", return_value=success):
+                        with patch.object(orch, "_tracer"):
+                            result = orch.negotiate(trip)
+
+    assert result.get("outcome") == "success", result
+    assert result.get("booking_ref"), "booking must still succeed (feasible=False is unverified, not a hard block)"
+    advisories = result.get("advisories", [])
+    assert any("Split" in a and "Vis" in a for a in advisories), (
+        f"the Split->Vis unverified-crossing caveat must reach top-level advisories: {advisories}"
+    )
+
+
+# ===========================================================================
 # CLUSTER 3a — _maybe_order_supper exception swallowed (lines 1573-1579)
 # ===========================================================================
 

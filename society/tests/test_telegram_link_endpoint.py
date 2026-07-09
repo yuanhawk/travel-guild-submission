@@ -82,7 +82,7 @@ def test_correct_session_token_still_succeeds(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "TravelGuildBot")
     with _client() as c:
         token = _login(c, "demo-mei")
-        r = c.get("/telegram/link", params={"user_id": "demo-mei", "session_token": token})
+        r = c.get("/telegram/link", params={"user_id": "demo-mei"}, headers={"X-Session-Token": token})
         assert r.status_code == 200
         assert r.json()["available"] is True
 
@@ -91,7 +91,7 @@ def test_bot_not_configured_honest_unavailable(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_USERNAME", raising=False)
     with _client() as c:
         token = _login(c, "demo-mei")
-        r = c.get("/telegram/link", params={"user_id": "demo-mei", "session_token": token})
+        r = c.get("/telegram/link", params={"user_id": "demo-mei"}, headers={"X-Session-Token": token})
         assert r.status_code == 200
         body = r.json()
         assert body["available"] is False
@@ -103,7 +103,7 @@ def test_bot_configured_issues_deep_link(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "TravelGuildBot")
     with _client() as c:
         token = _login(c, "demo-mei")
-        r = c.get("/telegram/link", params={"user_id": "demo-mei", "session_token": token})
+        r = c.get("/telegram/link", params={"user_id": "demo-mei"}, headers={"X-Session-Token": token})
         assert r.status_code == 200
         body = r.json()
         assert body["available"] is True
@@ -115,7 +115,7 @@ def test_issued_token_actually_resolves(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "TravelGuildBot")
     with _client() as c:
         token = _login(c, "demo-alex")
-        r = c.get("/telegram/link", params={"user_id": "demo-alex", "session_token": token})
+        r = c.get("/telegram/link", params={"user_id": "demo-alex"}, headers={"X-Session-Token": token})
         deep_link = r.json()["deep_link"]
         link_token = deep_link.split("?start=")[1]
 

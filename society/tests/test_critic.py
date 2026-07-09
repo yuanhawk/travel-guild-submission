@@ -434,6 +434,132 @@ def test_critic_non_contiguous_dates() -> None:
     )
 
 
+def test_critic_buffer_day_gap_accepted() -> None:
+    """
+    #51/BUG7 — long-haul structural-deadlock fix. The SAME 1-day gap shape as
+    test_critic_non_contiguous_dates, but this time transport_result carries a
+    requires_buffer_day=True edge for exactly this leg pair (a known long-haul
+    transfer, mirroring the A14 round-the-world archetype: tokyo->singapore
+    checkout/checkin 1 day apart). The gap must be ACCEPTED — no DATE_GAP — because
+    it is the transport rule's OWN required buffer day, not an unexplained gap.
+    """
+    itinerary = {
+        "user_id": "u-test",
+        "total_budget_cents": 80000,
+        "legs": [
+            {
+                "leg_id": "leg-0",
+                "city": "bali",
+                "checkin": "2025-10-01",
+                "checkout": "2025-10-04",
+                "adults": 1,
+                "hotel_id": "bali-alaya-ubud",
+                "total_cents": 49500,
+                "provenance": "live",
+            },
+            {
+                "leg_id": "leg-1",
+                "city": "bali",
+                "checkin": "2025-10-06",    # SAME 1-day-plus gap shape as the DATE_GAP test
+                "checkout": "2025-10-10",
+                "adults": 1,
+                "hotel_id": "bali-sanur-puri",
+                "total_cents": 27200,
+                "provenance": "cache",
+            },
+        ],
+        "transport_result": {
+            "edges": [
+                {
+                    "from_leg": "leg-0", "to_leg": "leg-1",
+                    "from_city": "bali", "to_city": "bali",
+                    "feasible": True, "mode": "flight",
+                    "transfer_minutes": 895,
+                    "requires_buffer_day": True,
+                }
+            ],
+            "infeasible_edges": [],
+        },
+    }
+    transport = SequencedMockTransport({
+        "lookup_catalog": [
+            _lookup_ok("bali-alaya-ubud", 49500),
+            _lookup_ok("bali-sanur-puri", 27200),
+        ],
+    })
+    client, _ = _make_critic_client(transport=transport)
+    task = _send_verify(client, itinerary)
+
+    assert task["status"]["state"] == "completed"
+    result = _extract_critic_result(task)
+
+    codes = [v["code"] for v in result["violations"]]
+    assert DATE_GAP not in codes, f"Buffer-day gap must NOT be DATE_GAP: {codes} / {result}"
+    assert result["decision"] == "verified", f"Expected verified: {result}"
+
+    print("PASS: test_critic_buffer_day_gap_accepted")
+
+
+def test_critic_unexplained_gap_still_rejected_even_with_transport_result() -> None:
+    """
+    #51/BUG7 — the exemption is NARROW: a transport_result that does NOT carry
+    requires_buffer_day for this exact leg pair must still reject an unexplained
+    gap as DATE_GAP (the fix must not accidentally waive every gap once any
+    transport_result is present)."""
+    itinerary = {
+        "user_id": "u-test",
+        "total_budget_cents": 80000,
+        "legs": [
+            {
+                "leg_id": "leg-0",
+                "city": "bali",
+                "checkin": "2025-10-01",
+                "checkout": "2025-10-04",
+                "adults": 1,
+                "hotel_id": "bali-alaya-ubud",
+                "total_cents": 49500,
+                "provenance": "live",
+            },
+            {
+                "leg_id": "leg-1",
+                "city": "bali",
+                "checkin": "2025-10-06",
+                "checkout": "2025-10-10",
+                "adults": 1,
+                "hotel_id": "bali-sanur-puri",
+                "total_cents": 27200,
+                "provenance": "cache",
+            },
+        ],
+        "transport_result": {
+            "edges": [
+                {
+                    "from_leg": "leg-0", "to_leg": "leg-1",
+                    "from_city": "bali", "to_city": "bali",
+                    "feasible": True, "mode": "same_area",
+                    "transfer_minutes": 30,
+                    # no requires_buffer_day — this gap is unexplained
+                }
+            ],
+            "infeasible_edges": [],
+        },
+    }
+    transport = SequencedMockTransport({
+        "lookup_catalog": [
+            _lookup_ok("bali-alaya-ubud", 49500),
+            _lookup_ok("bali-sanur-puri", 27200),
+        ],
+    })
+    client, _ = _make_critic_client(transport=transport)
+    task = _send_verify(client, itinerary)
+    result = _extract_critic_result(task)
+
+    codes = [v["code"] for v in result["violations"]]
+    assert DATE_GAP in codes, f"Unexplained gap must still be DATE_GAP: {codes}"
+
+    print("PASS: test_critic_unexplained_gap_still_rejected_even_with_transport_result")
+
+
 def test_critic_over_budget_sum() -> None:
     """
     Re-verified totals sum to more than total_budget_cents →
