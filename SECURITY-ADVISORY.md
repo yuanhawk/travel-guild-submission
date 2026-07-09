@@ -110,7 +110,7 @@ Found by an audit of `society/orchestration/server.py` and its dependents; all 9
 
 ### 10. Real AliCloud ECS instance details baked into a repo screenshot — Low (repo has always been private)
 
-**What:** Commit `186b82a` ("docs: add required AliCloud deployment screenshot, fix stale KMS proof section") added `docs/alicloud-deployment-proof.png` — an unredacted AliCloud console screenshot — and referenced its Instance ID (`i-t4n44gbij7622v7ecow4`) directly in `ALICLOUD-PROOF.md`'s text. The screenshot itself went further than the text disclosed: it showed a live public IP address, a private IP address, VPC and vSwitch resource IDs, instance type, and image ID.
+**What:** Commit `186b82a` ("docs: add required AliCloud deployment screenshot, fix stale KMS proof section") added `docs/alicloud-deployment-proof.png` — an unredacted AliCloud console screenshot — and referenced its Instance ID (redacted here; see the pre-fix git history if you genuinely need the literal value) directly in `ALICLOUD-PROOF.md`'s text. The screenshot itself went further than the text disclosed: it showed a live public IP address, a private IP address, VPC and vSwitch resource IDs, instance type, and image ID.
 
 This was caught by a follow-up review after the original 9 findings above were merged; it was not part of the original audit's scope.
 
