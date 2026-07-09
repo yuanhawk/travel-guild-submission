@@ -222,7 +222,28 @@ def _catalog_key(iso2: str, city: str) -> str:
 
 
 # #70: colloquial/state name -> POI-catalog city (mirrors the merchant cityCanonical).
-_POI_CITY_ALIASES = {"penang": "george town"}
+# "bali": the merchant hotel catalog books under "bali", but poi_catalog.json seeds Bali's
+# POI/restaurant data under its capital city "denpasar" -- without this alias every Bali trip
+# silently booked a real hotel but got a completely empty day-by-day plan.
+# "jeju island": the destination picker reads "Jeju Island", but the catalog only seeds
+# "jeju city" -- the bare "jeju" bridges via the " city" suffix rule, but "jeju island" does not.
+# 3 more instances of the same bug class -- the catalog seeds an older/alternate
+# transliteration while most travellers type the now-common spelling:
+# "ulaanbaatar" (modern) -> catalog has "ulan bator" (older); "ndjamena" (no apostrophe,
+# how most people type it) -> catalog has "n'djamena"; "gondar" (more common English
+# spelling) -> catalog has "gonder" (alt transliteration).
+# "port vila": the standard English spelling of Vanuatu's capital (with a space) -- the
+# catalog entry is keyed "port-vila" (hyphenated), matching this codebase's own canonical
+# spelling used elsewhere.
+_POI_CITY_ALIASES = {
+    "penang": "george town",
+    "bali": "denpasar",
+    "jeju island": "jeju city",
+    "ulaanbaatar": "ulan bator",
+    "ndjamena": "n'djamena",
+    "gondar": "gonder",
+    "port vila": "port-vila",
+}
 
 
 def _resolve_catalog_entry(iso2: str, city: str) -> tuple[dict | None, str]:
@@ -519,6 +540,21 @@ def _osm_subtype(category: Any) -> str:
     return c.split("=", 1)[1] if "=" in c else c
 
 
+# Outdoor water-activity attraction subtypes (OSM category, after the '='). Used
+# ONLY to DEPRIORITIZE (never hard-exclude — a thin catalog can still fall back to
+# one) when the leg carries an active HIGH/AVOID water-hazard risk signal (see
+# build_day_plan's water_activity_hazard param) — e.g. a cyclone/flood AVOID window
+# makes recommending a beach/water-park day plan directly conflict with the hazard
+# warning already surfaced elsewhere in the same response.
+_WATER_ACTIVITY_SUBTYPES = frozenset({"beach", "water_park", "beach_resort"})
+
+
+def _is_water_activity(a: dict) -> bool:
+    """True iff this attraction is an outdoor water-activity venue (beach / water
+    park / beach resort) — see _WATER_ACTIVITY_SUBTYPES."""
+    return _osm_subtype(a.get("category")) in _WATER_ACTIVITY_SUBTYPES
+
+
 def _is_curated(a: dict) -> bool:
     """True iff the attraction came from the Gemini-grounded must-see supplement
     (provenance stamped at load). These are hand-picked city icons."""
@@ -595,19 +631,45 @@ def _attraction_completeness(a: dict) -> int:
     return sum(1 for f in _ATTRACTION_COMPLETENESS_FIELDS if a.get(f))
 
 
-def _ranked_attractions(attractions: list[dict], interests: list[str]) -> list[tuple[int, dict]]:
+def _ranked_attractions(
+    attractions: list[dict],
+    interests: list[str],
+    deprioritize: "frozenset[str] | set[str] | None" = None,
+    avoid_water_activities: bool = False,
+) -> list[tuple[int, dict]]:
     """Return [(catalog_index, attraction), ...] in deterministic rank order.
 
-    rank key = (-interest_score:int, -notability_score:int, -completeness:int,
-    catalog_index:int, name_lower:str). All keys are integer/string — NEVER a float.
-    Notability floats a city's must-see icons above obscure nodes (the
-    alphabetical-dump fix); an explicit user interest still takes precedence;
-    completeness (round-2) breaks notability TIES toward the more richly-documented,
-    more likely globally-known venue; catalog_index/name give a total, stable
-    tiebreak so identical inputs stay byte-identical (var-0)."""
+    rank key = (deprioritized:int, hazard_category:int, -interest_score:int,
+    -notability_score:int, -completeness:int, catalog_index:int, name_lower:str).
+    All keys are integer/string — NEVER a float. Notability floats a city's
+    must-see icons above obscure nodes (the alphabetical-dump fix); an explicit
+    user interest still takes precedence; completeness (round-2) breaks
+    notability TIES toward the more richly-documented, more likely
+    globally-known venue; catalog_index/name give a total, stable tiebreak so
+    identical inputs stay byte-identical (var-0).
+
+    `deprioritize` (OPTIONAL, default None -> byte-identical): attraction names
+    (lowercased, matches _attraction_name_lower) already surfaced on an EARLIER
+    leg of THIS SAME trip that revisits this city. Sinks them (1) below every
+    not-yet-shown attraction (0) as the FIRST sort key — the strongest signal,
+    ahead of interest/notability — so a repeat city visit varies its itinerary
+    instead of reproducing the identical day plan, while a genuinely thin
+    catalog can still fall back to a repeat rather than an empty day
+    (deprioritized, never excluded).
+
+    `avoid_water_activities` (OPTIONAL, default False -> byte-identical): when
+    True, sinks outdoor water-activity venues (beach / water park / beach
+    resort — see _is_water_activity) below every other attraction as the
+    SECOND sort key, so the itinerary does not recommend swimming/water sports
+    in the same response that separately warns an active HIGH/AVOID hazard
+    (cyclone, flood) may curtail them for this leg. Deprioritized, never
+    excluded — a beach-only city still gets a plan."""
+    dep = deprioritize or frozenset()
     indexed = list(enumerate(attractions))
     indexed.sort(
         key=lambda pair: (
+            1 if _attraction_name_lower(pair[1]) in dep else 0,
+            1 if (avoid_water_activities and _is_water_activity(pair[1])) else 0,
             -_interest_score(pair[1], interests),
             -_notability_score(pair[1]),
             -_attraction_completeness(pair[1]),
@@ -616,6 +678,68 @@ def _ranked_attractions(attractions: list[dict], interests: list[str]) -> list[t
         )
     )
     return indexed
+
+
+# ---------------------------------------------------------------------------
+# "chapel-spam" fix (live QA finding): the "Suggested" POI rail
+# (`unscheduled_attractions`, the overflow tail of `_ranked_attractions` beyond the
+# scheduled-day capacity) is a DATA/SELECTION defect, not a rendering one. A catalog
+# bucket can genuinely hold a large cluster of near-duplicate narrow-category rows —
+# e.g. a city's harvest carrying 11 separate "Capela de ..." (chapel) nodes, all
+# `amenity=place_of_worship`, all tied at the SAME notability/completeness score, so
+# `_ranked_attractions`' deterministic tiebreak (catalog_index — i.e. raw harvest
+# order) keeps them clumped together. That clump then dominates the first visible
+# slice of the suggestion rail, even though the SAME catalog has plenty of category
+# variety further down.
+#
+# Fix scope: reorder ONLY the visible/near-term window of the overflow list that
+# feeds the suggestion rail — never the scheduled day-plan attractions (a separate,
+# already-notability-ranked concern), never the raw catalog (no data added/removed/
+# hidden). Within the first `window` slots, cap how many rows share the same OSM/
+# free-text category (`_osm_subtype`) to `cap_per_category`; category-capped rows are
+# deferred, not dropped — they still surface later in the SAME list (full catalog
+# depth intact for pagination/scroll), and if too few distinct categories exist to
+# fill the window, deferred rows backfill it (diversity is a preference, never a
+# reason to artificially shrink what the catalog can show). A list already at or
+# under `window` is returned untouched (byte-identical for exactly the case that
+# matters least — nothing to reorder). Deterministic: single forward pass, only
+# int/dict-`.get` operations, no float/random/set-iteration -> var-0 safe.
+# ---------------------------------------------------------------------------
+
+_SUGGESTION_RAIL_WINDOW = 12    # visible/near-term slice a first-screenful rail shows
+_SUGGESTION_RAIL_CATEGORY_CAP = 2  # max rows of one category inside that window
+
+
+def _diversify_suggestion_window(
+    ranked: list[tuple[int, dict]],
+    window: int = _SUGGESTION_RAIL_WINDOW,
+    cap_per_category: int = _SUGGESTION_RAIL_CATEGORY_CAP,
+) -> list[tuple[int, dict]]:
+    """Reorder *ranked* ((catalog_index, attraction) pairs, already rank-ordered) so
+    the first `window` entries aren't dominated by many same-category rows (e.g. a
+    cluster of "Capela de ..." chapels). Category-capped rows are pushed to the tail
+    IN THEIR ORIGINAL RELATIVE ORDER — never dropped — and backfilled into the window
+    if diversity alone can't fill it. No-op when len(ranked) <= window."""
+    if len(ranked) <= window:
+        return list(ranked)
+
+    counts: dict[str, int] = {}
+    selected: list[tuple[int, dict]] = []
+    deferred: list[tuple[int, dict]] = []
+    for item in ranked:
+        cat = _osm_subtype((item[1] or {}).get("category"))
+        if len(selected) < window and counts.get(cat, 0) < cap_per_category:
+            selected.append(item)
+            counts[cat] = counts.get(cat, 0) + 1
+        else:
+            deferred.append(item)
+
+    if len(selected) < window and deferred:
+        need = window - len(selected)
+        selected.extend(deferred[:need])
+        deferred = deferred[need:]
+
+    return selected + deferred
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1185,9 @@ def build_day_plan(
     meal_cuisines: dict[str, str] | None = None,
     dining_tier: str | None = None,
     children: int | None = None,
+    prior_attraction_names: "frozenset[str] | set[str] | None" = None,
+    prior_meal_identities: list[str] | None = None,
+    water_activity_hazard: bool = False,
 ) -> dict:
     """Build a deterministic per-leg day plan.
 
@@ -1069,7 +1196,28 @@ def build_day_plan(
     inputs (var-0).
 
     On a catalog miss (unknown city) returns a conservative empty plan with
-    catalog_hit=false and an explanatory note — NEVER fabricates POIs."""
+    catalog_hit=false and an explanatory note — NEVER fabricates POIs.
+
+    CROSS-LEG memory (OPTIONAL, default None -> byte-identical to before): a trip
+    that revisits the SAME city on a LATER, separate leg previously got the exact
+    same attractions/restaurants both times (this function's own within-leg
+    day-to-day variety, e.g. meal_history below, was always seeded fresh per
+    call — it had no memory of an EARLIER leg at all). `prior_attraction_names`
+    (lowercased names already shown on an earlier leg to this city) deprioritizes
+    — never hard-excludes — those attractions here (see _ranked_attractions);
+    `prior_meal_identities` seeds this leg's own within-trip meal-variety history
+    so a repeat-city leg's meal selection picks up where the earlier leg left off
+    instead of restarting empty. The caller (day_planner_agent's activity.plan
+    handler) is the one place that sees every leg of a trip in a single call, so
+    it owns tracking/threading this state across repeat-city legs.
+
+    `water_activity_hazard` (OPTIONAL, default False -> byte-identical): True
+    when the orchestrator's Risk assessment carries an active HIGH/AVOID
+    water-related hazard (cyclone or flood AVOID window) for THIS leg.
+    Deprioritizes outdoor water-activity attractions (see _ranked_attractions)
+    and appends an honest note so the itinerary never silently recommends
+    swimming/water sports in the same response that separately warns they may
+    be curtailed for this leg."""
     interests = list(interests or [])
     interest_map = dict(interest_map or {})
     dietary = list(dietary or [])
@@ -1099,11 +1247,20 @@ def build_day_plan(
         )
 
     # --- num_days: prefer the checkin→checkout span; fall back conservatively. ---
+    # day-count fix: the span in calendar days between checkin and checkout is the
+    # NIGHT count (e.g. Oct 1 -> Oct 7 = 6 nights), not the number of calendar days
+    # that actually get scheduled content. Standard travel convention is "N nights /
+    # N+1 days" — the guest has activity time on the arrival day, on each full
+    # night's day, AND on the checkout-morning day itself before departing — so a
+    # day_plan with only `nights` entries silently drops one full calendar day of
+    # scheduled content versus what "N nights" (or an equivalent "N+1 days") trip
+    # actually spans.
     computed_days: int | None = None
     try:
         d_in = date.fromisoformat((checkin or "").strip())
         d_out = date.fromisoformat((checkout or "").strip())
-        computed_days = max((d_out - d_in).days, 1)
+        _nights = max((d_out - d_in).days, 1)
+        computed_days = _nights + 1
     except (ValueError, TypeError):
         notes.append(
             f"could not parse checkin/checkout ({checkin!r}/{checkout!r}); "
@@ -1139,11 +1296,23 @@ def build_day_plan(
     }
 
     if entry is None:
-        # Conservative miss — empty days/meals, no fabricated POIs.
+        # Conservative miss — empty days/meals, no fabricated POIs. The raw
+        # diagnostic (internal catalog key, e.g. "ID:bali") is logged HERE ONLY,
+        # for debugging — never surfaced to a user. This note used to BE that raw
+        # diagnostic string, which then leaked verbatim into a user-facing
+        # advisory, because orchestrator.py lifts every day-plan note into
+        # result["advisories"]. The note below is clean, honest, human-readable
+        # copy instead.
+        logger.info(
+            "day_planner_agent: catalog miss city=%r iso2=%r resolved_key=%r — "
+            "returning conservative empty plan (no POIs/meals fabricated).",
+            city, iso2, key,
+        )
+        _city_label = (city or "").strip() or "This destination"
         notes.append(
-            f"unknown city for activity planning: no POI catalog entry for "
-            f"{key!r}; returning a conservative empty plan (no attractions/meals "
-            f"fabricated). Verify locally."
+            f"{_city_label} is an unknown city for activity planning — no "
+            f"verified attraction or restaurant data is available yet, so this "
+            f"leg's day plan is intentionally left empty (nothing fabricated)."
         )
         result["days"] = [
             {
@@ -1187,8 +1356,23 @@ def build_day_plan(
             f"attraction(s)."
         )
 
+    # honest disclosure when water-activity venues are actually present but
+    # deprioritized for an active hazard (silent downgrade would just look like
+    # "this city has no beaches" rather than "avoided on purpose").
+    if water_activity_hazard and any(_is_water_activity(a) for a in attractions):
+        notes.append(
+            "an active weather hazard (cyclone/flood) for this leg may curtail "
+            "swimming/water sports — beach and water-park attractions were "
+            "deprioritized in this plan; verify conditions locally before any "
+            "water activity."
+        )
+
     # --- Attraction ranking + day assignment (pace cap) ---
-    ranked = _ranked_attractions(attractions, interests)
+    ranked = _ranked_attractions(
+        attractions, interests,
+        deprioritize=prior_attraction_names,
+        avoid_water_activities=water_activity_hazard,
+    )
     cap = _PACE_CAP.get(_lower(pace), _DEFAULT_PACE_CAP)
 
     # Fill day 0,1,2,... up to cap per day in rank order; overflow → unscheduled.
@@ -1377,7 +1561,10 @@ def build_day_plan(
 
     # --- Per-day assembly ---
     supper_missing_days: list[int] = []
-    meal_history: list[str] = []   # venue identities chosen across the WHOLE leg → cross-day variety
+    # Seed from an EARLIER leg's identities (same city, revisited later in this trip)
+    # instead of always starting empty, so a repeat-city leg continues the SAME
+    # within-trip variety chain rather than reproducing the identical meal plan.
+    meal_history: list[str] = list(prior_meal_identities or [])   # venue identities chosen across the WHOLE leg → cross-day variety
     chain_use: dict[str, int] = {}    # (b) per-LEG per-CHAIN-name count → hard cap ≤2 per city
     capped_chains: set[str] = set()   # chains at the cap → _select_meal skips them
     cuisine_unmet: set[str] = set()   # (c) slots whose requested cuisine had no match → honest note
@@ -1495,7 +1682,11 @@ def build_day_plan(
         result["days"][_TRIM_DAY_INDEX]["travel_note"] = travel_note
         notes.append(travel_note)   # surface at leg level too
 
-    result["unscheduled_attractions"] = [_stamp_attraction(a) for (_ci, a) in overflow]
+    # Diversify only the SUGGESTION-RAIL ordering (never the scheduled day
+    # attractions above, never the underlying catalog) — see _diversify_suggestion_window.
+    result["unscheduled_attractions"] = [
+        _stamp_attraction(a) for (_ci, a) in _diversify_suggestion_window(overflow)
+    ]
     return result
 
 
@@ -1653,10 +1844,23 @@ class DayPlannerAgent(A2AAgent):
         if not isinstance(legs, list):
             raise ValueError("legs must be a list")
 
+        # CROSS-LEG memory. This handler is the ONE place that sees every leg of a
+        # trip in a single call, so it is the place that can notice a LATER leg
+        # revisits a city an EARLIER leg already planned. Tracked by the SAME
+        # catalog key build_day_plan itself resolves on (iso2:city, lowercased) —
+        # a repeat leg's city/iso2 strings are the input the user actually
+        # repeated, so this needs no fuzzy re-resolution. Without this, each leg
+        # called build_day_plan cold, with no memory of an earlier leg's choices,
+        # so a revisited city produced a BYTE-IDENTICAL day plan both times (same
+        # top-ranked attractions, same meal_history reset to empty).
+        _city_attraction_names: dict[str, set[str]] = {}
+        _city_meal_identities: dict[str, list[str]] = {}
+
         leg_plans: list[dict] = []
         for leg in legs:
             if not isinstance(leg, dict):
                 continue
+            _key = _catalog_key(leg.get("iso2", ""), leg.get("city", ""))
             plan = build_day_plan(
                 city=leg.get("city", ""),
                 iso2=leg.get("iso2", ""),
@@ -1674,9 +1878,31 @@ class DayPlannerAgent(A2AAgent):
                 meal_cuisines=leg.get("meal_cuisines"),   # edit-lane set_meal_cuisine
                 dining_tier=leg.get("dining_tier"),
                 children=leg.get("children"),             # #party-fix: kid-appropriate signals
+                prior_attraction_names=_city_attraction_names.get(_key),
+                prior_meal_identities=_city_meal_identities.get(_key),
+                # Orchestrator-computed HIGH/AVOID water hazard for this leg (see
+                # orchestrator's Risk-agent wiring); absent/False on every trip
+                # with no Risk agent wired or no such hazard (var-0).
+                water_activity_hazard=bool(leg.get("water_activity_hazard")),
             )
             plan["leg_id"] = leg.get("leg_id")
             leg_plans.append(plan)
+
+            # Accumulate this leg's identities so a LATER leg revisiting the same
+            # city (same _key) varies its plan instead of repeating this one.
+            _names = _city_attraction_names.setdefault(_key, set())
+            _idents = _city_meal_identities.setdefault(_key, [])
+            for _day in plan.get("days", []) or []:
+                for _a in _day.get("attractions", []) or []:
+                    if isinstance(_a, dict):
+                        _nm = _attraction_name_lower(_a)
+                        if _nm:
+                            _names.add(_nm)
+                for _meal in (_day.get("meals") or {}).values():
+                    if isinstance(_meal, dict):
+                        _ident = _meal_identity(_meal)
+                        if _ident:
+                            _idents.append(_ident)
 
         result_data = {"leg_plans": leg_plans}
 

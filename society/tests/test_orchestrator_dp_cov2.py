@@ -154,7 +154,7 @@ class _ScriptedOrchestrator(TravelOrchestrator):
         return self._critic_scripts[i]
 
     # --- transport ------------------------------------------------------
-    def _call_transport(self, legs, persona="default"):  # type: ignore[override]
+    def _call_transport(self, legs, persona="default", overland_only=False):  # type: ignore[override]
         self.call_order.append("transport")
         if not self._transport_scripts:
             return None
@@ -502,7 +502,10 @@ def test_run_negotiation_rounds_critic_verified_commits() -> None:
 
     assert result["outcome"] == "success", result
     assert seen_commit_payload.get("buyer_consent") is True, seen_commit_payload
-    assert seen_commit_payload.get("idempotency_key") == "trip-test"
+    # var-0 fix (task #49 re-plan): the commit idempotency_key is now the base
+    # key plus a ':'-separated digest of the FINAL negotiated package (see
+    # _package_digest in orchestrator.py) -- a prefix match, not an exact one.
+    assert seen_commit_payload.get("idempotency_key", "").startswith("trip-test:"), seen_commit_payload
     assert seen_commit_payload.get("checkout_id") == "co-XYZ"
     assert result.get("booking_ref")
 
@@ -1052,6 +1055,127 @@ def test_mint_booking_ref_preserves_suffix_without_cosmetic_prefix() -> None:
     # No 'co-local-' prefix → just strip BK- and graft dest token.
     out = TravelOrchestrator._mint_booking_ref("BK-xyz999", "ID")
     assert out == "BK-ID-xyz999", out
+
+
+# ===========================================================================
+# #94 — _enrich_leg_meta_dest_country backfills the Planner-skeleton's missing
+# dest_country from self._trip_request_legs (the side-channel introduced for
+# the day-planner, #87), so _primary_dest_token no longer silently falls
+# through to a CITY_TO_ISO2 guess for every trip.
+# ===========================================================================
+
+def test_enrich_leg_meta_dest_country_backfills_from_trip_request_legs() -> None:
+    """
+    leg_meta, as built by _negotiate_dp/_negotiate_greedy, comes straight from
+    the Planner-agent skeleton output — city/checkin/checkout/adults/
+    per_leg_budget_cents only, NEVER dest_country (see the #30 day-planner
+    block comment, ~line 2498). Before #94 this meant _primary_dest_token's
+    `lm.get("dest_country")` branch was DEAD CODE in production: it always
+    read None and fell through to the CITY_TO_ISO2 city guess, regardless of
+    what dest_country the caller explicitly supplied.
+    """
+    orch = TravelOrchestrator()
+    # Mirrors the true skeleton shape: NO dest_country key at all.
+    leg_meta = {
+        "leg-0": {"leg_id": "leg-0", "city": "richmond", "checkin": "2026-12-01",
+                  "checkout": "2026-12-04", "adults": 1, "per_leg_budget_cents": 30000},
+    }
+    orch._trip_request_legs = [
+        {"city": "richmond", "dest_country": "US", "checkin": "2026-12-01",
+         "checkout": "2026-12-04", "adults": 1},
+    ]
+    orch._enrich_leg_meta_dest_country(leg_meta)
+    assert leg_meta["leg-0"]["dest_country"] == "US", leg_meta
+
+
+def test_enrich_leg_meta_dest_country_never_overwrites_explicit_value() -> None:
+    """Additive only — a leg that already carries dest_country is left alone."""
+    orch = TravelOrchestrator()
+    leg_meta = {"leg-0": {"leg_id": "leg-0", "city": "richmond", "dest_country": "CA"}}
+    orch._trip_request_legs = [{"city": "richmond", "dest_country": "US"}]
+    orch._enrich_leg_meta_dest_country(leg_meta)
+    assert leg_meta["leg-0"]["dest_country"] == "CA", leg_meta
+
+
+def test_enrich_leg_meta_dest_country_noop_without_trip_request_legs() -> None:
+    """No side-channel set (e.g. a direct _negotiate_dp/_negotiate_greedy caller
+    that bypasses negotiate()) → no-op, byte-identical to pre-#94 behaviour."""
+    orch = TravelOrchestrator()
+    leg_meta = {"leg-0": {"leg_id": "leg-0", "city": "richmond"}}
+    orch._enrich_leg_meta_dest_country(leg_meta)
+    assert "dest_country" not in leg_meta["leg-0"], leg_meta
+
+
+def test_negotiate_dp_booking_ref_uses_explicit_dest_country_not_city_guess() -> None:
+    """
+    #94 END-TO-END regression: "richmond" is a city-name collision — it exists
+    under BOTH Canada and the United States in the merchant catalog, and
+    CITY_TO_ISO2['richmond'] happens to resolve to 'CA' (catalog insertion
+    order). Before #94, a caller who explicitly requested
+    dest_country='US' still got a booking_ref minted with the WRONG 'CA'
+    token, because leg_meta (built from the dest_country-less Planner
+    skeleton) never carried the caller's dest_country through to
+    _primary_dest_token. This drives the REAL _negotiate_dp path (Planner
+    skeleton WITHOUT dest_country, exactly like production) and asserts the
+    minted booking_ref reflects the caller's explicit 'US', not the city-map
+    guess.
+    """
+    from utils.intent_parser import CITY_TO_ISO2
+    if CITY_TO_ISO2.get("richmond") != "CA":
+        pytest.skip(
+            "This public export ships a redacted 10-row sample catalog "
+            "(ucp-merchant/catalog.json), not the real curated catalog richmond's "
+            "city-name-collision behavior depends on — CITY_TO_ISO2 is built from "
+            "that file at import time, so this environment has no city that "
+            "actually exhibits the CA/US collision this test needs to distinguish "
+            "the two code paths. See _enrich_leg_meta_dest_country's other unit "
+            "tests above for the same fix covered without needing real catalog data."
+        )
+
+    # Skeleton legs — NO dest_country (mirrors the real Planner agent output).
+    skeleton_legs = [
+        _leg("leg-0", "richmond", 30000, dp_selected_hotel_id="richmond-us-h",
+             dp_selected_total_cents=12000),
+    ]
+    trip = {
+        "user_id": "u1",
+        "total_budget_cents": 100000,
+        "legs": [
+            {"city": "richmond", "dest_country": "US",
+             "checkin": "2026-12-01", "checkout": "2026-12-04", "adults": 1},
+        ],
+    }
+    orch = _ScriptedOrchestrator(
+        planner_legs=skeleton_legs,
+        planner_dp_used=True,
+        gather_scripts={
+            "leg-0": [{"hotel_id": "richmond-us-h", "total_cents": 12000,
+                       "review_score": 8.0, "star_rating": 4.0}],
+        },
+        budget_check_scripts=[_check_ok()],
+        transport_scripts=[_transport_ok()],
+        critic_scripts=[_critic_verified()],
+        budget_commit_scripts=[_commit_accept("BK-co-local-richmond1", total_cents=12000)],
+    )
+    orch._trip_id = "test-trip"
+    orch._trip_request_legs = trip["legs"]
+    result = orch._negotiate_dp(
+        trip_request=trip,
+        user_id="u1",
+        total_budget_cents=100000,
+        effective_ceiling=100000,
+        idempotency_key="trip-dp-richmond",
+        negotiation_log=[],
+        target_areas={},
+        area_stage={},
+        lodging_budget_cents=100000,
+    )
+    assert result["outcome"] == "success", result
+    ref = result.get("booking_ref", "")
+    assert ref.startswith("BK-US-"), (
+        f"#94 regression: booking_ref must use the caller's explicit "
+        f"dest_country=US, not the richmond→CA CITY_TO_ISO2 guess: {ref!r}"
+    )
 
 
 if __name__ == "__main__":

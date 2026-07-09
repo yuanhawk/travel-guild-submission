@@ -166,7 +166,7 @@ class _ScriptedOrch(TravelOrchestrator):
         return self._critic_scripts[i]
 
     # --- transport -----------------------------------------------------
-    def _call_transport(self, legs, persona="default"):  # type: ignore[override]
+    def _call_transport(self, legs, persona="default", overland_only=False):  # type: ignore[override]
         self.call_order.append("transport")
         if not self._transport_scripts:
             return None

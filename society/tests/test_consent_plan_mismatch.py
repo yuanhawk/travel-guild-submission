@@ -36,16 +36,26 @@ _IDK = "trip-consent-mismatch-0001"
 _OWNER = "owner-token-consent-mismatch"
 
 
-def _held_plan_body(total_cents: int, checkout_id: str) -> dict:
+def _held_plan_body(total_cents: int, checkout_id: str, *, city: str = "tokyo",
+                     hotel_id: str | None = None, day_plans: list | None = None) -> dict:
     """A plan_ready result shaped like what orchestrator.negotiate(commit=False)
-    returns, about to be persisted via _persist_and_sanitize_plan."""
+    returns, about to be persisted via _persist_and_sanitize_plan.
+
+    `checkout_id` is the merchant CHECKOUT SESSION id — an ephemeral, per-call
+    identifier that is NEVER part of the plan's reviewable content (real
+    hotel_ids are stable catalog ids, wholly independent of the session that
+    happened to book them). `hotel_id` defaults to a value DERIVED from
+    checkout_id only so that legacy total-divergence-only tests below (which
+    want two calls to look "obviously different") stay convenient to write —
+    any test that means to assert "same content, new session" (a genuine
+    retry) must pass an explicit, IDENTICAL `hotel_id` across both calls."""
     return {
         "outcome": "plan_ready",
         "idempotency_key": _IDK,
         "package_total_with_fees_cents": total_cents,
-        "legs": [{"city": "tokyo", "hotel_id": f"hotel-{checkout_id}",
+        "legs": [{"city": city, "hotel_id": hotel_id or f"hotel-{checkout_id}",
                   "checkin": "2026-10-15", "checkout": "2026-10-19"}],
-        "day_plans": [],
+        "day_plans": day_plans if day_plans is not None else [],
         "_confirm_ctx": {
             "user_id": "", "checkout_id": checkout_id, "dest_token": "JP",
             "idempotency_key": _IDK, "merchant_user_id": "",
@@ -100,24 +110,112 @@ class TestConsentPlanMismatch(unittest.TestCase):
         self.assertEqual(derived_row["checkout_id"], "co-2")
 
     def test_same_digest_same_total_still_reuses_the_original_key(self):
-        """Sanity counterpart: when the re-run's total is UNCHANGED (the normal,
-        harmless idempotent-replay case), the fix must NOT fork a new key —
-        confirms the guard doesn't break ordinary re-POST idempotency."""
-        first = _held_plan_body(120_000, "co-1")
+        """Sanity counterpart: when the re-run is a genuine retry — IDENTICAL
+        content (legs/day_plans), same total, just a fresh merchant checkout
+        session (new checkout_id) — the fix must NOT fork a new key. Confirms
+        the content-hash divergence check doesn't spuriously fork an ordinary
+        re-POST/client-retry just because the merchant minted a new session id."""
+        first = _held_plan_body(120_000, "co-1", hotel_id="hotel-tokyo-standard")
         body = {"user_id": "", "owner_token": _OWNER}
         server._persist_and_sanitize_plan(dict(first), dict(body))
 
-        # Re-run with the SAME total (a harmless identical replay — e.g. a
-        # fresh merchant checkout session with the exact same priced content).
-        replay = _held_plan_body(120_000, "co-1-replay")
+        # Re-run with the SAME total AND same content — only checkout_id (the
+        # ephemeral merchant session id, never part of plan content) differs.
+        replay = _held_plan_body(120_000, "co-1-replay", hotel_id="hotel-tokyo-standard")
         out_replay = server._persist_and_sanitize_plan(dict(replay), dict(body))
 
         self.assertEqual(
             out_replay["idempotency_key"], _IDK,
-            "an identical-total re-run should NOT be forked to a new key",
+            "an identical-content, identical-total re-run should NOT be forked "
+            "to a new key",
         )
         row = self.store.get_plan(_IDK)
         self.assertEqual(row["package_total_cents"], 120_000)
+        # The row's checkout_id legitimately advances to the new session's —
+        # that IS the safe in-place overwrite this guard is meant to still allow.
+        self.assertEqual(row["checkout_id"], "co-1-replay")
+
+    # -- M6-content: same TOTAL, genuinely DIFFERENT content must still fork -
+
+    def test_same_total_different_city_content_forks_not_overwrites(self):
+        """CRITICAL money-path repro (task #88 adversarial audit): a second
+        /negotiate under the SAME idempotency_key with DIFFERENT legs (Cebu vs
+        Davao — different city, same dates/budget) whose priced total
+        coincidentally matches the first must FORK, not silently overwrite the
+        held row's envelope in place. Before the fix, the guard only compared
+        package_total_cents — identical totals let a completely different trip
+        clobber the stored row a stale tab is still reviewing."""
+        cebu = _held_plan_body(34180, "co-cebu", city="cebu",
+                                hotel_id="hotel-cebu-1",
+                                day_plans=[{"day": 1, "city": "cebu", "items": ["cebu-item"]}])
+        body = {"user_id": "", "owner_token": _OWNER}
+        out_cebu = server._persist_and_sanitize_plan(dict(cebu), dict(body))
+        self.assertEqual(out_cebu["idempotency_key"], _IDK)
+
+        row_after_cebu = self.store.get_plan(_IDK)
+        self.assertEqual(row_after_cebu["package_total_cents"], 34180)
+        self.assertEqual(row_after_cebu["envelope"]["legs"][0]["city"], "cebu")
+
+        # Second /negotiate, SAME idempotency_key, DIFFERENT city — but the
+        # SAME coincidental total (flat/deterministic demo catalog pricing).
+        davao = _held_plan_body(34180, "co-davao", city="davao",
+                                 hotel_id="hotel-davao-1",
+                                 day_plans=[{"day": 1, "city": "davao", "items": ["davao-item"]}])
+        out_davao = server._persist_and_sanitize_plan(dict(davao), dict(body))
+
+        self.assertNotEqual(
+            out_davao["idempotency_key"], _IDK,
+            "REGRESSION (M6-content): a same-total, DIFFERENT-CITY re-plan "
+            "under the same idempotency_key was persisted under the SAME "
+            "key — a stale tab reviewing Cebu can now /confirm and book "
+            "Davao instead.",
+        )
+
+        # The ORIGINAL (Cebu) row must be byte-for-byte untouched.
+        row_still_cebu = self.store.get_plan(_IDK)
+        self.assertEqual(row_still_cebu["package_total_cents"], 34180)
+        self.assertEqual(row_still_cebu["envelope"]["legs"][0]["city"], "cebu",
+                         "REGRESSION: the original Cebu row's legs were overwritten with Davao")
+
+        # The new (Davao) content is persisted, just under its own distinct key.
+        derived_row = self.store.get_plan(out_davao["idempotency_key"])
+        self.assertIsNotNone(derived_row)
+        self.assertEqual(derived_row["package_total_cents"], 34180)
+        self.assertEqual(derived_row["envelope"]["legs"][0]["city"], "davao")
+
+        # And — mirroring M6's total-divergence fork — the original row must
+        # be pointed forward at the fork so it can never independently
+        # /confirm stale content alongside the new generation.
+        self.assertEqual(row_still_cebu.get("superseded_by"), out_davao["idempotency_key"])
+
+    def test_confirm_after_content_fork_commits_the_correct_row(self):
+        """Downstream check: after a content-divergence fork, /confirm-style
+        access (store.get_plan keyed on whatever idempotency_key the CALLER
+        actually holds) must resolve to the RIGHT content — a stale tab on the
+        original key sees Cebu; a client that received the new key sees Davao.
+        This is exactly what server.confirm()/orchestrator.commit_plan() read
+        (row['envelope']) to build the merchant commit call."""
+        cebu = _held_plan_body(34180, "co-cebu", city="cebu", hotel_id="hotel-cebu-1")
+        body = {"user_id": "", "owner_token": _OWNER}
+        server._persist_and_sanitize_plan(dict(cebu), dict(body))
+
+        davao = _held_plan_body(34180, "co-davao", city="davao", hotel_id="hotel-davao-1")
+        out_davao = server._persist_and_sanitize_plan(dict(davao), dict(body))
+        derived_idk = out_davao["idempotency_key"]
+
+        # A stale tab still holding the ORIGINAL key must see Cebu, and must
+        # be told it's superseded (server.confirm()'s own superseded_by check)
+        # rather than being allowed to silently commit against a row that
+        # actually contains someone else's later plan.
+        stale_row = self.store.get_plan(_IDK)
+        self.assertEqual(stale_row["envelope"]["legs"][0]["city"], "cebu")
+        self.assertEqual(stale_row.get("superseded_by"), derived_idk)
+
+        # A client that received the derived key sees exactly the Davao plan
+        # it was just given — never the stale Cebu content.
+        fresh_row = self.store.get_plan(derived_idk)
+        self.assertEqual(fresh_row["envelope"]["legs"][0]["city"], "davao")
+        self.assertEqual(fresh_row.get("superseded_by"), "")
 
     def test_no_existing_row_persists_normally_under_the_base_key(self):
         """Sanity counterpart: the very FIRST plan for a digest (no existing

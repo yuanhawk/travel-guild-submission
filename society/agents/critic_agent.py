@@ -60,6 +60,11 @@ Hard gates (reject on ANY violation — §2):
     DUPLICATE_LEG        — two legs share a leg_id (malformed itinerary) (D4).
     INVALID_DATE         — checkin >= checkout or dates malformed.
     DATE_GAP             — gap between consecutive legs (leg[k].checkout != leg[k+1].checkin).
+                           EXEMPTION (#51/BUG7): a gap that matches a transport-edge
+                           requires_buffer_day=True signal (a known long-haul transfer's
+                           OWN required buffer day, e.g. the A14 round-the-world
+                           archetype) is honoured, not rejected — only an unexplained
+                           gap is still a hard violation.
     DATE_OVERLAP         — legs overlap.
     OVER_BUDGET          — sum of re-verified totals > total_budget_cents.
     MISSING_PROVENANCE   — leg carries no provenance tag (not traceable to backend).
@@ -681,6 +686,30 @@ class CriticAgent(A2AAgent):
             legs,
             key=lambda leg: (_parse_date(leg.get("checkin", "")) or date.min),
         )
+        # #51/BUG7 — long-haul multi-leg structural-deadlock fix. The transport rule
+        # is correct that a >240min transfer (e.g. a long-haul flight) REQUIRES a
+        # gap/buffer day between legs (society/agents/transport_agent.py's
+        # same-day-inter-city-transfer check) — see the A14 round-the-world
+        # archetype test. Before this fix, Gate 3 rejected ANY gap as DATE_GAP with
+        # no way to tell "an unexplained gap" (still correctly rejected) apart from
+        # "the transport rule's own required buffer day for a known long transfer"
+        # (was incorrectly rejected too) — net effect: zero gap -> Transport flags
+        # TRANSPORT_INFEASIBLE, any gap -> Critic flags DATE_GAP, so NO long-haul
+        # multi-leg trip could ever book. Build a lookup of the transport edges
+        # that carry the STRUCTURAL requires_buffer_day signal (the single source
+        # of truth — computed in transport_agent.py from the exact same threshold
+        # that would make a zero-gap version of this same pair infeasible) so a
+        # gap matching a genuine required buffer is honoured instead of rejected.
+        buffer_required_pairs: set[frozenset] = set()
+        if isinstance(transport_result, dict):
+            for edge in transport_result.get("edges", []) or []:
+                if not isinstance(edge, dict):
+                    continue
+                if edge.get("requires_buffer_day") and edge.get("feasible", True):
+                    fl = edge.get("from_leg")
+                    tl = edge.get("to_leg")
+                    if fl and tl:
+                        buffer_required_pairs.add(frozenset({fl, tl}))
         # Check leg[k].checkout == leg[k+1].checkin, no gap, no overlap.
         for k in range(len(legs_by_date) - 1):
             curr = legs_by_date[k]
@@ -695,11 +724,20 @@ class CriticAgent(A2AAgent):
                 # Date parse errors already flagged by Gate 2; skip contiguity check
                 continue
             if curr_co_d < nxt_ci_d:
-                violations.append(_violation(
-                    DATE_GAP, nxt_id,
-                    f"Gap between leg {curr_id!r} (checkout {curr_co}) and "
-                    f"leg {nxt_id!r} (checkin {nxt_ci}) — {(nxt_ci_d - curr_co_d).days} day(s) missing.",
-                ))
+                if frozenset({curr_id, nxt_id}) in buffer_required_pairs:
+                    # A gap here is the transport rule's OWN required buffer day for
+                    # a known long transfer — expected and correct, never DATE_GAP.
+                    logger.info(
+                        "critic.verify: gap leg=%s->%s (%d day(s)) matches a "
+                        "transport-required buffer day — accepted, not DATE_GAP",
+                        curr_id, nxt_id, (nxt_ci_d - curr_co_d).days,
+                    )
+                else:
+                    violations.append(_violation(
+                        DATE_GAP, nxt_id,
+                        f"Gap between leg {curr_id!r} (checkout {curr_co}) and "
+                        f"leg {nxt_id!r} (checkin {nxt_ci}) — {(nxt_ci_d - curr_co_d).days} day(s) missing.",
+                    ))
             elif curr_co_d > nxt_ci_d:
                 violations.append(_violation(
                     DATE_OVERLAP, nxt_id,

@@ -7528,11 +7528,39 @@ def assess_leg(
     # Occurrence chance = the MAX modeled seasonal-climatology likelihood across the
     # %-quantifiable natural hazards. Categorical advisories (war/unrest/L3-L4/seismic)
     # are NOT a % chance — they carry their own severity in `advisory` + `alert_tier`,
-    # so we never fabricate a number for them. Band cutoffs mirror the AVOID/FLAG bps.
+    # so we never fabricate a number for them.
+    #
+    # The band is a PROJECTION of the SAME advisory severities that alert_tier
+    # reads — restricted to the %-quantifiable natural hazards — so the two
+    # headline UI fields are consistent BY CONSTRUCTION and cannot contradict:
+    #   high  natural-hazard advisory  -> "high"    (mirrors alert_tier HIGH)
+    #   medium natural-hazard advisory -> "moderate"(mirrors alert_tier MED)
+    #   none fired, but some hazard bp > 0 -> "low" (a sub-flag signal exists,
+    #                                                 not loud enough to advise)
+    #   nothing quantifiable           -> "none"
+    #
+    # Why derive from the advisory list, not from per-hazard bp thresholds: the
+    # advisories already encode BOTH each hazard's own FLAG/AVOID bar (the four
+    # hazards do NOT share one scale — flood FLAGs at 1500, drought at 4000 and is
+    # advisory-only) AND the drought→wildfire COMPOUND bump that raises a
+    # sub-AVOID wildfire advisory to "high". A bp-threshold band would miss that
+    # bump and re-introduce a divergence (e.g. Perth/Mar: alert_tier HIGH from the
+    # compound, but a "moderate" band because wildfire_bp<AVOID). It also fixes the
+    # original flat-cutoff bug in the other direction (e.g. flood_bp=1300 < FLAG:
+    # no advisory, so band is "low", not the old contradictory "moderate").
+    # Categorical advisories (war/unrest/L3-L4/seismic) carry no % — they surface
+    # via alert_tier + categorical_advisory_present, never the band.
+    _NAT_HAZARD_ADVISORY_TYPES = {
+        "cyclone_window", "flood_season", "wildfire_season", "drought",
+    }
+    _nat_hazard_sevs = {
+        a["severity"] for a in advisory
+        if a.get("type") in _NAT_HAZARD_ADVISORY_TYPES
+    }
     _max_hazard_bp = max(cyclone_bp, flood_bp, wildfire_bp, drought_bp)
-    if _max_hazard_bp >= 3000:
+    if "high" in _nat_hazard_sevs:
         _occ_band = "high"
-    elif _max_hazard_bp >= 1000:
+    elif "medium" in _nat_hazard_sevs:
         _occ_band = "moderate"
     elif _max_hazard_bp > 0:
         _occ_band = "low"

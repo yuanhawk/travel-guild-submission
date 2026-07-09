@@ -358,6 +358,31 @@ def test_commit_recovery_merchant_veto_cannot_satisfy():
     assert "mandate expired" in out["reason"]
 
 
+def test_commit_recovery_sets_top_level_buyer_consent_on_commit_payload():
+    """
+    CI-coverage-audit regression test (2026-07): the ONLY prior verification of
+    this fix was e2e_py/live_recovery_commit_e2e.py, an ad-hoc script explicitly
+    self-documented as "NOT IN THE CI SUITE" -- it needs a real merchant, so it
+    never runs in CI. Every mocked commit_recovery test above stubs
+    _call_budget_commit with a fixed dict that never inspects the outgoing
+    payload, so a regression that silently drops the top-level `buyer_consent`
+    key (reverting to nested-only ap2_mandate, which the merchant's HITL gate at
+    the default L2 autonomy tier does NOT read) would pass every test in
+    society/tests/ while breaking every real recovery commit against the live
+    merchant. Capture the actual outgoing payload and assert on it directly.
+    """
+    seen_payload = {}
+
+    def _capture_commit(payload):
+        seen_payload.update(payload)
+        return {"decision": "accept", "booking_ref": "BK-recovery"}
+
+    ro = _make_ro(commit=_capture_commit)
+    out = ro.commit_recovery(_ready(), {"buyer_consent": True}, "u1")
+    assert out["outcome"] != RECOVERY_OUTCOME_CANNOT_SATISFY, out
+    assert seen_payload.get("buyer_consent") is True, seen_payload
+
+
 # ===========================================================================
 # cancel_recovery()
 # ===========================================================================

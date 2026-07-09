@@ -351,10 +351,20 @@ def _fallback_transfer(from_city: str, to_city: str, persona: str = "default") -
     tier = _rail_tier(from_city, to_city)
     max_km = _overland_ceiling(tier, persona)
     if km <= max_km and _overland_possible(from_city, to_city):
-        speed = _HSR_RAIL_KMH if tier == "hsr" else _GROUND_SPEED_KMH
-        raw = _GROUND_OVERHEAD_MIN + km / speed * 60.0
+        # #51/BUG8 — a same-landmass, in-range pair is NECESSARY but not SUFFICIENT
+        # evidence of a real rail line. HSR pairs are already curated (_rail_tier);
+        # a 'conventional' pair needs its OWN curated evidence (or a fixed rail
+        # link) before we confidently claim mode='rail'. No evidence -> stay
+        # honest: 'overland_unverified' (still an advisory estimate, never a
+        # confident wrong claim like the Mandalay->Imphal fabricated-rail finding).
+        if tier == "hsr" or _has_curated_rail_evidence(from_city, to_city):
+            speed = _HSR_RAIL_KMH if tier == "hsr" else _GROUND_SPEED_KMH
+            raw = _GROUND_OVERHEAD_MIN + km / speed * 60.0
+            minutes = int(round(raw / 5.0)) * 5
+            return max(minutes, 20), "rail"
+        raw = _GROUND_OVERHEAD_MIN + km / _GROUND_SPEED_KMH * 60.0
         minutes = int(round(raw / 5.0)) * 5
-        return max(minutes, 20), "rail"
+        return max(minutes, 20), "overland_unverified"
     raw = _FALLBACK_OVERHEAD_MIN + km / _FALLBACK_CRUISE_KMH * 60.0
     minutes = int(round(raw / 5.0)) * 5     # 5-min buckets → ULP-stable
     return max(minutes, 30), "flight"
@@ -559,6 +569,46 @@ def _rail_tier(from_city: str, to_city: str) -> str:
     hops (Gifu-Kanazawa is a ~2h limited express, not Shinkansen). Unlisted pairs default to
     conventional (honest under-claim). Only meaningful when the pair is overland-possible."""
     return "hsr" if frozenset({_normalise(from_city), _normalise(to_city)}) in _HSR_PAIRS else "conventional"
+
+
+# ---------------------------------------------------------------------------
+# #51/BUG8 — CONVENTIONAL rail evidence gate. HSR and overnight-sleeper corridors
+# are already curated (society/hsr_corridors.json, society/sleeper_corridors.json);
+# conventional rail was NOT — any same-landmass, in-range pair was labelled
+# mode='rail' from a distance check alone, with zero infrastructure evidence. That
+# fabricated e.g. a confident 315-minute Mandalay->Imphal 'rail' leg across the
+# Myanmar-India border, one of Asia's most famously rail-less/restricted crossings.
+# Mirrors the HSR/sleeper curation discipline: unlisted pairs default to the honest
+# 'overland_unverified' advisory in _fallback_transfer, never a confident rail claim.
+# SCOPE: a full worldwide curated conventional-rail dataset is out of scope for this
+# fix (see conventional_rail_corridors.json's _comment) — this closes the ZERO-
+# evidence hole, it does not attempt exhaustive real-world rail coverage.
+# ---------------------------------------------------------------------------
+def _load_conventional_rail() -> frozenset:
+    try:
+        import json
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "conventional_rail_corridors.json")
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return frozenset(frozenset({str(a).strip().lower(), str(b).strip().lower()})
+                         for a, b in d.get("pairs", []) if a and b)
+    except Exception:
+        return frozenset()
+
+
+_CONVENTIONAL_RAIL_PAIRS = _load_conventional_rail()
+
+
+def _has_curated_rail_evidence(from_city: str, to_city: str) -> bool:
+    """True iff this pair has SOME curated real-world evidence of an actual rail line:
+    a curated conventional-rail corridor, or a fixed rail link across water (Channel
+    Tunnel etc — _FIXED_LINK_PAIRS; HSR trunk pairs are handled separately by
+    _rail_tier() == 'hsr', which is itself curated evidence). Unlisted pairs are NOT
+    assumed to have rail — same-landmass + in-range is a necessary but NOT sufficient
+    condition for a real train (#51/BUG8)."""
+    key = frozenset({_normalise(from_city), _normalise(to_city)})
+    return key in _CONVENTIONAL_RAIL_PAIRS or key in _FIXED_LINK_PAIRS
 
 
 def _overland_ceiling(tier: str, persona: str = "default") -> int:
@@ -1064,6 +1114,18 @@ def _is_water_crossing_unverified(from_city: str, to_city: str) -> bool:
     surfaced as an unverified gap, never papered over by the haversine flight
     fallback (no airline flies the crossing). Distinct cities only.
 
+    #51/BUG8 (Naples->Ischia) — ALSO true when the pair is separated by water
+    (different landmass) AND both cities' resolvable nearest_airport() gateways
+    are the SAME airport (or one/both cities have none at all). Two cities that
+    share a single gateway airport (or an airport-less endpoint) have no real
+    DISTINCT flight between them — _air_transfer already returns None for exactly
+    this reason — so falling through to the haversine flight estimate would
+    fabricate a flight neither city can actually offer (Ischia has no airport;
+    it and Naples both resolve to NAP). This is a curated-evidence-style
+    STRUCTURAL check, not a lookup-table patch — the hand-seeded ferry_network.json
+    coverage is necessarily incomplete (it doesn't list Ischia at all), so relying
+    on _FERRY_ISLAND_CITIES membership alone missed this case entirely.
+
     PHANTOM-SAFE / fail-conservative: never assumes a crossing is feasible."""
     a = _normalise(from_city)
     b = _normalise(to_city)
@@ -1071,7 +1133,70 @@ def _is_water_crossing_unverified(from_city: str, to_city: str) -> bool:
         return False
     if frozenset({a, b}) in _FERRY_ROUTES:
         return False
-    return a in _FERRY_ISLAND_CITIES or b in _FERRY_ISLAND_CITIES
+    if a in _FERRY_ISLAND_CITIES or b in _FERRY_ISLAND_CITIES:
+        return True
+    if not _overland_possible(from_city, to_city):
+        na = nearest_airport(from_city)
+        nb = nearest_airport(to_city)
+        if na is None or nb is None or na[0] == nb[0]:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# #95 (follow-up to #54) — overland_only RE-RESOLUTION. #54 shipped the HARD
+# no-fly gate as a straight REJECT of any DEFAULT-RESOLVED mode=="flight" edge.
+# That is fail-closed-SAFE (never fabricates a rail link, never books a flight
+# against the request) but it over-rejects: a curated HSR/rail corridor can
+# coexist with a flight that the AIR layer wins by default (e.g. Beijing-
+# Shanghai, ~1068 km, just past the 1000 km comfort-preference cutoff in
+# _overland_ceiling — see that constant's docstring). The cutoff exists to pick
+# a sensible DEFAULT between two AVAILABLE options; it is not evidence the rail
+# corridor doesn't exist. Once the traveller has hard-ruled out flying
+# (overland_only=True), a genuinely curated corridor must not be silently
+# declined just because it sits outside the 'preferred' range.
+#
+# Mirrors the _short_overland_hop drop-air pattern (used to suppress the air
+# layer for a short in-range hop during DEFAULT resolution), but deliberately
+# does NOT apply that pattern's distance ceiling for a pair with curated
+# evidence — overland_only means flying is already off the table, so the
+# ceiling's UX-preference role no longer applies.
+#
+# PHANTOM-SAFE / fail-closed: returns None (no surface option) unless a REAL
+# ferry route is seeded or the pair carries curated rail evidence (HSR trunk
+# corridor or a curated conventional-rail pair, #51/BUG8) — same-landmass +
+# in-range alone is never sufficient (mirrors _has_curated_rail_evidence). The
+# caller keeps the existing cannot_satisfy decline when this returns None.
+# ---------------------------------------------------------------------------
+def _overland_only_reresolve(
+    from_city: str, to_city: str, persona: str = "default",
+) -> tuple[int, str, dict] | None:
+    """Drop a DEFAULT-RESOLVED flight and look for a genuine surface alternative for
+    an overland_only=True request. Order: seeded ferry -> _fallback_transfer's own
+    overland branch (covers any in-range case not already caught upstream) ->
+    curated rail evidence (HSR/conventional) computed WITHOUT the comfort-preference
+    distance ceiling. Returns (minutes, mode, extra) or None (no real option;
+    fail-closed, never fabricates a corridor)."""
+    ferry = _ferry_transfer(from_city, to_city)
+    if ferry is not None:
+        return ferry
+    if not _overland_possible(from_city, to_city):
+        return None  # genuine water crossing, no seeded ferry -> no surface option
+    fb = _fallback_transfer(from_city, to_city, persona)
+    if fb is not None and fb[1] != "flight":
+        return fb[0], fb[1], {}
+    tier = _rail_tier(from_city, to_city)
+    if tier != "hsr" and not _has_curated_rail_evidence(from_city, to_city):
+        return None  # no curated evidence at any distance -> stay honest, decline
+    a = _CITY_COORDS.get(_canonical_city(from_city))
+    b = _CITY_COORDS.get(_canonical_city(to_city))
+    if a is None or b is None:
+        return None
+    km = _haversine_km(a, b)
+    speed = _HSR_RAIL_KMH if tier == "hsr" else _GROUND_SPEED_KMH
+    raw = _GROUND_OVERHEAD_MIN + km / speed * 60.0
+    minutes = max(int(round(raw / 5.0)) * 5, 20)
+    return minutes, "rail", {}
 
 
 def _compute_edge(
@@ -1079,6 +1204,7 @@ def _compute_edge(
     leg_k1: dict,
     cancelled_transfers: set[tuple[str, str]] | None = None,
     persona: str = "default",
+    overland_only: bool = False,
 ) -> dict[str, Any]:
     """
     Compute a single transfer edge between two consecutive legs.
@@ -1091,6 +1217,17 @@ def _compute_edge(
     with mode="flight_cancelled" so the cascade-recovery loop re-routes around it.
     Default None preserves the legacy behaviour (no transfer faults) so existing
     tests/consumers are unchanged.
+
+    ``overland_only`` (#54, follow-up to #51's transport-honesty fix) is a
+    request-level HARD constraint: the traveller explicitly asked for a no-fly /
+    surface-only itinerary. When True, an edge whose ONLY resolvable transport
+    option is mode=="flight" is forced FEASIBLE=False (see the check near the end
+    of this function, applied LAST so it always wins over any other reason/
+    feasibility computed above). This does NOT relabel or upgrade any other
+    mode's honesty status — an 'overland_unverified' edge stays exactly as
+    unverified-but-feasible as it already was; we simply refuse to fabricate/
+    allow a flight where the request said none should exist. Default False is
+    BYTE-IDENTICAL to current behaviour (purely additive gate).
     """
     from_leg   = leg_k.get("leg_id", "")
     to_leg     = leg_k1.get("leg_id", "")
@@ -1162,6 +1299,20 @@ def _compute_edge(
     # Ferry labels populated only when the ferry layer routes this edge (seeded
     # sea crossing). Absent otherwise -> unchanged shape (append-only).
     ferry_extra: dict | None = None
+    # #113 (sibling of #51/BUG8's rail evidence gate) — an UNVERIFIED flight claim:
+    # either (a) _fallback_transfer's coordinate-only estimate (NO air-network evidence
+    # at all — neither/either city lacks a real airport within range, per _air_transfer
+    # returning None) fabricating mode="flight" from distance alone, or (b) _air_transfer's
+    # own "connection (routing assumed)" branch — a real airport exists at both ends but
+    # NO verified one-hop hub route was found, so the specific connecting path is an
+    # assumption, not a confirmed itinerary (see that branch's docstring). Both are
+    # honesty gaps mirroring the already-fixed rail case: a confident mode="flight" edge
+    # asserted with no (or only partial) route evidence. Set here, applied as
+    # edge["unverified"]=True near the end (mirrors unverified_rail) so check_feasibility's
+    # unverified_edges split — and downstream orchestrator.transport_unverified /
+    # critic_agent's advisory — actually see it instead of silently trusting it.
+    unverified_flight = False
+    unverified_flight_reason: str | None = None
 
     try:
         minutes, mode = _lookup_transfer(from_city, to_city, from_area, to_area)
@@ -1185,6 +1336,19 @@ def _compute_edge(
             _air = None
         if _air is not None:
             minutes, mode, air_extra = _air
+            if air_extra.get("air_option") == "connection (routing assumed)":
+                # #113 — no verified one-hop hub exists; _air_transfer's own docstring
+                # says "treat as advisory only, do not assert a confirmed itinerary."
+                # Flag it so that caveat actually reaches unverified_edges/transport_unverified
+                # instead of being dropped on the floor (it was previously computed but never
+                # surfaced past the air_option string itself).
+                unverified_flight = True
+                unverified_flight_reason = (
+                    f"flight routing assumed: {from_city!r}→{to_city!r} has no verified "
+                    f"one-hop hub connection in the air-route network (~{minutes} min "
+                    f"estimate incl. layover) — the specific connecting itinerary is NOT "
+                    f"confirmed; do not assert a confirmed routing before booking."
+                )
         elif (_ferry := _ferry_transfer(from_city, to_city)) is not None:
             # Seeded inter-island / coastal ferry: a REAL labelled feasible edge.
             # Consulted AFTER the air layer (an island WITH an airport keeps its
@@ -1236,16 +1400,84 @@ def _compute_edge(
                     "transfer_minutes": -1,
                     "reason":           f"No seeded transfer time for {from_city!r} → {to_city!r}",
                 }
-            # Coordinate fallback succeeded → treat as a normal (feasible) flight edge.
+            # Coordinate fallback succeeded → treat as a normal (feasible) flight/rail edge.
             minutes, mode = _fb
+            # #113 — mode=='flight' here means _air_transfer found NO real airport within
+            # _NEAREST_AIRPORT_MAX_KM of one or both cities (it already returned None), the pair
+            # has no seeded ferry, and _is_water_crossing_unverified didn't already catch it (i.e.
+            # this is a same-landmass pair beyond overland range). That is a confident flight
+            # link fabricated from great-circle distance + a constant cruise speed ALONE — the
+            # exact same "claim a specific transport link exists from distance alone, no
+            # infrastructure evidence" pattern #51/BUG8 already closed for rail (mirrors
+            # 'overland_unverified' immediately below). Flag it so it surfaces as an honest
+            # advisory, never a silently-trusted confident booking.
+            if mode == "flight":
+                unverified_flight = True
+                unverified_flight_reason = (
+                    f"flight distance-estimated (~{minutes} min) for {from_city!r}→{to_city!r} "
+                    f"from coordinates only — neither city has a known airport within "
+                    f"{_NEAREST_AIRPORT_MAX_KM:.0f} km in the route-evidence network, so no "
+                    f"real flight link is confirmed; do not assume this flight exists — "
+                    f"confirm the actual transport mode before booking."
+                )
+
+    # #95 (follow-up to #54) — overland_only re-resolution, applied BEFORE any of the
+    # mode-dependent feasibility/advisory checks below so a re-resolved rail/ferry edge
+    # is treated exactly like any other real rail/ferry edge (no stale flight-only
+    # same-day/buffer-day logic bleeds through from the discarded flight resolution).
+    # ONLY mode=="flight" is reconsidered; every other mode (road/rail/
+    # overland_unverified/ferry/same_area) is untouched. When re-resolution finds
+    # nothing, `mode` is left exactly as "flight" so the final overland_only gate below
+    # still declines it (fail-closed — never fabricates a corridor with no evidence).
+    # Absent/False overland_only is a no-op -> byte-identical to pre-#95 behaviour.
+    overland_only_reresolved = False
+    if overland_only and mode == "flight":
+        _surface = _overland_only_reresolve(from_city, to_city, persona)
+        if _surface is not None:
+            minutes, mode, _surface_extra = _surface
+            air_extra = None
+            ferry_extra = _surface_extra if mode == "ferry" else None
+            overland_only_reresolved = True
+            # #113 — the discarded flight resolution's evidence-gap caveat no longer
+            # applies once we've re-resolved onto a genuine (curated-evidence) surface
+            # alternative; that alternative carries its own honesty gate (rail's
+            # unverified_rail below, or a real seeded ferry).
+            unverified_flight = False
+            unverified_flight_reason = None
 
     feasible = True
     reason: str | None = None
     long_drive = False
     distance_km: int | None = None
+    unverified_rail = False
 
     fc_norm = _normalise(from_city)
     tc_norm = _normalise(to_city)
+
+    # #51/BUG8 — mode=='overland_unverified' means the coordinate/landmass fallback
+    # found a same-landmass, in-range pair but NO curated rail-corridor evidence (see
+    # _has_curated_rail_evidence). Stay FEASIBLE — an overland transfer by SOME means
+    # (at minimum road) is still plausible for a same-landmass pair — but flag it
+    # unverified so the gates surface an honest advisory, never a confident 'rail'
+    # claim manufactured from distance alone (mirrors the #70 unverified-edge honesty
+    # discipline already used for unseeded pairs / unverified water crossings).
+    if mode == "overland_unverified":
+        unverified_rail = True
+        reason = (
+            f"overland transfer estimated (~{minutes} min, same landmass) for "
+            f"{from_city!r}→{to_city!r}, but no curated rail-corridor evidence — "
+            f"do not assume a train exists; confirm the actual transport mode before "
+            f"booking."
+        )
+
+    # #113 — apply the flight evidence-gap advisory in the SAME slot as overland_unverified
+    # above (still mode=='flight': #95 re-resolution above already cleared the flag if it
+    # swapped onto a genuine surface alternative). A more specific/urgent reason set below
+    # (same-day-implausible) still wins by unconditional overwrite — exactly the existing
+    # overland_unverified precedent; a genuine date collision is the more urgent signal
+    # regardless of how the flight time itself was estimated.
+    if unverified_flight and mode == "flight":
+        reason = unverified_flight_reason
 
     # Same-day inter-city feasibility check (flights only)
     if fc_norm != tc_norm and mode == "flight":
@@ -1256,6 +1488,23 @@ def _compute_edge(
                 f"{from_city!r}→{to_city!r} requires ~{minutes} min "
                 f"but checkin and checkout are both {checkout!r}"
             )
+
+    # #51/BUG7 — STRUCTURAL "requires a buffer day" signal, computed from the exact
+    # SAME condition as the same-day-infeasibility check above (cross-city flight,
+    # minutes > _SAME_DAY_INTERCITY_THRESHOLD), but UNCONDITIONAL on the actual
+    # checkin/checkout relationship. This is the single source of truth the Critic
+    # consults to distinguish "an unexplained gap between legs" (still correctly
+    # rejected as DATE_GAP) from "a gap that IS this transport rule's own required
+    # buffer day for a known long transfer" (correctly accepted, never DATE_GAP) —
+    # see critic_agent.py Gate 3. Without this edges-carry-their-own-requirement
+    # signal, a zero-gap version of this same pair is infeasible (above) AND any
+    # gapped version was rejected by the Critic as DATE_GAP — a structural deadlock
+    # that made every long-haul multi-leg trip unbookable (audit flagship finding;
+    # the A14 round-the-world archetype test exercises exactly this).
+    if fc_norm != tc_norm and mode == "flight" and minutes > _SAME_DAY_INTERCITY_THRESHOLD:
+        edge_requires_buffer_day = True
+    else:
+        edge_requires_buffer_day = False
 
     # WA inter-town ROAD long-drive advisory (still feasible — add a buffer).
     wa_key = frozenset({fc_norm, tc_norm})
@@ -1281,6 +1530,30 @@ def _compute_edge(
             f"({mode}). Add a buffer day between these legs."
         )
 
+    # #54 — overland_only / no_fly HARD constraint. Checked LAST (after every other
+    # feasibility/advisory computation above) so it always takes final precedence and
+    # its reason is never silently overwritten by a same-day/long-transfer advisory
+    # computed earlier. ONLY mode=="flight" is affected — road/rail/overland_unverified/
+    # ferry/same_area edges are untouched, so this never fabricates an overland option
+    # that isn't there; it only refuses to silently book/allow a flight the request said
+    # should not exist (fail-closed, mirrors the #51/#70 honesty discipline). Absent/False
+    # (the default) is a no-op → byte-identical to pre-#54 behaviour.
+    # #95 — by the time we get here, `mode` has already been through the re-resolution
+    # attempt above: if a curated rail/ferry alternative was found, mode is no longer
+    # "flight" and this block is a no-op for this edge; it only fires when NO real
+    # surface option exists at all (the fail-closed decline is unchanged).
+    overland_only_violation = False
+    if overland_only and mode == "flight":
+        feasible = False
+        overland_only_violation = True
+        reason = (
+            f"overland_only requested: {from_city!r}→{to_city!r} has no known "
+            f"overland (rail/road/ferry) option — the only resolvable transfer "
+            f"is a flight (~{minutes} min). Refusing to book/allow a flight "
+            f"against an explicit overland-only/no-fly request; confirm an "
+            f"alternative overland routing or drop overland_only for this leg."
+        )
+
     edge = {
         "from_leg":         from_leg,
         "to_leg":           to_leg,
@@ -1293,11 +1566,60 @@ def _compute_edge(
         "transfer_minutes": minutes,
         "reason":           reason,
     }
+    # #51/BUG7 — append-only: present ONLY on an edge that structurally requires a
+    # buffer day (see the computation above). Absent on every other edge → existing
+    # consumers/tests see the unchanged shape (var-0).
+    if edge_requires_buffer_day:
+        edge["requires_buffer_day"] = True
+    # #54 — append-only: present ONLY when overland_only rejected this edge (a flight
+    # was the only resolvable option). Lets a consumer/test distinguish this HARD
+    # request-constraint rejection from a "genuine" same-day/cancelled infeasibility.
+    if overland_only_violation:
+        edge["overland_only_violation"] = True
+    # #95 — append-only: present ONLY when overland_only forced a re-resolution AWAY
+    # from a default-flight mode onto a genuine surface alternative (curated rail
+    # evidence or a seeded ferry) that the default (preference-ranked) resolution
+    # would not have picked. Lets a consumer/test/audit distinguish this from an edge
+    # that was already overland by default.
+    if overland_only_reresolved:
+        edge["overland_only_reresolved"] = True
     # Additive fields for road legs (absent for legacy Bali/flight edges so
     # existing tests/consumers see the unchanged shape).
     if distance_km is not None:
         edge["distance_km"] = distance_km
         edge["long_drive"] = long_drive
+    # #51/BUG8 — mirrors the #70 unverified-edge shape (mode='unknown' /
+    # 'water_crossing_unverified'): 'unverified' present ONLY when the rail claim
+    # lacks curated evidence, so check_feasibility's unverified_edges surfacing
+    # (-> the orchestrator's advisories list) picks it up without any hard block.
+    # #113 — mirrors the SAME shape for the flight-side evidence gap: a coordinate-only
+    # flight fabricated with no airport evidence, or an air-network 'connection (routing
+    # assumed)' with no verified one-hop hub. Set even if a later check (same-day) also
+    # made this edge feasible=False — exactly like the existing no-coords/'unknown' case
+    # above (#70: NO DATA ≠ infeasible; this is an evidence-quality tag, not a fresh
+    # feasibility verdict) — so check_feasibility's unverified_edges split still surfaces
+    # it as an honest advisory via orchestrator.transport_unverified / critic_agent,
+    # instead of the caveat being silently dropped.
+    #
+    # EXCEPT when overland_only_violation is also set: unverified_flight is the ONLY
+    # kind of unverified flag that can now coincide with mode=="flight" (unverified_rail
+    # never does — it only fires for mode=="overland_unverified", which overland_only's
+    # gate above never touches). Before #113 added unverified_flight, an overland_only-
+    # rejected flight edge NEVER carried 'unverified', so it always landed in
+    # check_feasibility's infeasible_edges bucket (mutually exclusive with
+    # unverified_edges by construction — see that split below) and correctly tripped
+    # critic_agent's hard TRANSPORT_INFEASIBLE reject. Letting 'unverified' win here
+    # would silently reclassify an explicit, HARD no-fly-request violation into the
+    # SOFT unverified_edges advisory bucket — critic_agent's Gate 7 does not reject on
+    # unverified_edges, so the #54 overland_only hard constraint would be silently
+    # defeated for exactly the routes most likely to trigger it (a same-landmass pair
+    # far enough to have no seeded flight is also the pair most likely to fall to the
+    # coordinate-only fallback). The overland_only decline is the more specific,
+    # authoritative verdict (mirrors the "checked LAST, always wins" precedence this
+    # gate already has over `reason` above) — an edge already hard-rejected by explicit
+    # request policy has no need for a softer evidence-quality caveat layered on top.
+    if (unverified_rail or unverified_flight) and not overland_only_violation:
+        edge["unverified"] = True
     # Additive air-network labels (only when the air layer routed this edge).
     # PHANTOM-SAFE: air_option is 'nonstop' (real direct), 'connection (via hub)'
     # (verified one-hop), or 'connection (routing assumed)' (no verified path).
@@ -1477,6 +1799,7 @@ def check_feasibility(
     legs: list[dict],
     cancelled_transfers: set[tuple[str, str]] | None = None,
     persona: str = "default",
+    overland_only: bool = False,
 ) -> dict[str, Any]:
     """
     Run the full transport feasibility check on an ordered list of legs.
@@ -1492,13 +1815,19 @@ def check_feasibility(
     "default" (the default) is byte-identical to the pre-persona behaviour (var-0). Unknown values
     fall back to default.
 
+    ``overland_only`` (#54) is a request-level HARD no-fly constraint: True rejects
+    (feasible=False) any edge whose only resolvable transport option is mode=="flight",
+    instead of silently allowing/booking it. Default False is byte-identical to
+    pre-#54 behaviour (purely additive gate) — see ``_compute_edge`` for the exact
+    honesty contract (it never relabels/upgrades any other mode's status).
+
     Returns a typed TransportResult dict.
     """
     persona = persona if persona in _PERSONAS else "default"
     edges: list[dict[str, Any]] = []
 
     for k in range(len(legs) - 1):
-        edge = _compute_edge(legs[k], legs[k + 1], cancelled_transfers, persona)
+        edge = _compute_edge(legs[k], legs[k + 1], cancelled_transfers, persona, overland_only)
         edges.append(edge)
 
     # #70: split feasible=False edges into GENUINELY-infeasible vs UNVERIFIED (no-data).
@@ -1700,7 +2029,10 @@ class TransportAgent(A2AAgent):
         # Optional persona ("comfort" widens the rail-preference range). Wrapped-dict form only;
         # absent / list payload → "default" (byte-identical legacy behaviour).
         persona = payload.get("persona", "default") if isinstance(payload, dict) else "default"
-        result_data = check_feasibility(legs, cancelled_transfers or None, persona)
+        # #54 — optional overland_only / no_fly HARD constraint. Wrapped-dict form only;
+        # absent / list payload / falsy → False (byte-identical legacy behaviour).
+        overland_only = bool(payload.get("overland_only", False)) if isinstance(payload, dict) else False
+        result_data = check_feasibility(legs, cancelled_transfers or None, persona, overland_only)
 
         logger.info(
             "transport.feasibility: %d legs → %d edges, %d infeasible, reorder=%s",

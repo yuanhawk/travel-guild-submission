@@ -459,7 +459,7 @@ def test_gate_before_commit_transport_reject() -> None:
     # _call_transport to always return infeasible.
 
     class InfeasibleTransportOrchestrator(TravelOrchestrator):
-        def _call_transport(self, legs, persona="default"):
+        def _call_transport(self, legs, persona="default", overland_only=False):
             return {
                 "decision": "infeasible",
                 "infeasible_edges": [
@@ -559,7 +559,7 @@ def test_reorder_conflicting_with_dates_is_rejected_not_applied() -> None:
             self.transport_calls = 0
             self.transport_call_leg_orders: list[list[str]] = []
 
-        def _call_transport(self, legs, persona="default"):  # type: ignore[override]
+        def _call_transport(self, legs, persona="default", overland_only=False):  # type: ignore[override]
             self.transport_calls += 1
             self.transport_call_leg_orders.append([leg["leg_id"] for leg in legs])
             if self.transport_calls == 1:
@@ -656,7 +656,7 @@ def test_reorder_matching_dates_is_still_applied() -> None:
             super().__init__(*a, **kw)
             self.transport_calls = 0
 
-        def _call_transport(self, legs, persona="default"):  # type: ignore[override]
+        def _call_transport(self, legs, persona="default", overland_only=False):  # type: ignore[override]
             self.transport_calls += 1
             if self.transport_calls == 1:
                 return {

@@ -159,7 +159,7 @@ class _ScriptedOrch(TravelOrchestrator):
         return self._critic_scripts[i]
 
     # --- transport --------------------------------------------------------------
-    def _call_transport(self, legs, persona="default"):  # type: ignore[override]
+    def _call_transport(self, legs, persona="default", overland_only=False):  # type: ignore[override]
         self.call_order.append("transport")
         if not self._transport_scripts:
             return None
@@ -794,40 +794,33 @@ def test_negotiate_declined_countries_via_city_resolution_kyiv() -> None:
            "not" in text.lower(), text
 
 
-def test_negotiate_non_dict_leg_skipped_in_declined_countries_loop_only() -> None:
+def test_negotiate_non_dict_leg_rejected_by_early_robustness_guard() -> None:
     """
-    Line 1249 / Line 1282: the declined_countries loop (line 1247) and the
-    negotiate_started tracer stubs loop (line 1280) both guard against non-dict
-    legs via `continue`.
-
-    DRIFT FINDING: The Destination loop at line 1323 does NOT have the same
-    isinstance guard — `leg.get(...)` at line 1331 would crash on a non-dict
-    leg. This is documented as a DRIFT below in the findings.
-
-    This test exercises lines 1249 and 1282 by using a subclass that overrides
-    the Destination call so the crash is avoided, confirming the branches are
-    reachable when only the guarded loops are in scope.
+    UPDATED (adversarial-audit date-crash fix, task #48): negotiate() now has
+    an early robustness guard (added right after the legs/budget presence
+    checks) that validates every leg is a dict AND has a sane checkin/checkout
+    range, BEFORE any of the mid-pipeline loops this test originally probed
+    (the declined_countries loop, the tracer-stubs loop, and the previously
+    UNGUARDED Destination loop) ever run. A non-dict leg is now caught at the
+    very first opportunity with an honest `invalid_request` decline — the
+    mid-pipeline "DRIFT FINDING" this test used to document (Destination's own
+    missing isinstance guard) is now unreachable via the public negotiate()
+    entrypoint, since nothing downstream of the new guard ever sees the
+    malformed leg. This is strictly better: fail closed as early and as
+    honestly as possible, matching every other guard in this block.
     """
-    class _SkipDestination(TravelOrchestrator):
-        """Overrides _call_destination to no-op (avoids crash on non-dict legs)."""
-        def _call_destination(self, city, vibe, checkin=None, checkout=None):  # type: ignore[override]
-            return []
-
-    orch = _SkipDestination()
-    # Inject enough of a script to short-circuit after the declined_countries check.
-    # A non-dict leg causes `continue` at line 1249 (declined_countries loop)
-    # and at line 1282 (tracer stubs loop).
-    # The valid dict leg sets dest_country to a DO_NOT_RECOMMEND code (UA) so
-    # the negotiate() terminates BEFORE any full agent pipeline runs.
+    orch = TravelOrchestrator()
     trip = {
         "user_id": "u1",
         "total_budget_cents": 500_000,
         "today": "2026-06-16",
         "legs": [
-            "not-a-dict",      # lines 1249 + 1282: continue
+            "not-a-dict",
             {
                 "city": "kyiv",
-                "dest_country": "UA",   # DO_NOT_RECOMMEND → early terminal
+                "dest_country": "UA",   # would be a DO_NOT_RECOMMEND terminal,
+                                        # but the malformed sibling leg is now
+                                        # caught before this is ever reached.
                 "checkin": "2026-12-01",
                 "checkout": "2026-12-04",
                 "adults": 1,
@@ -836,11 +829,9 @@ def test_negotiate_non_dict_leg_skipped_in_declined_countries_loop_only() -> Non
     }
     result = orch.negotiate(trip)
 
-    # The non-dict leg was skipped (lines 1249 + 1282 continue), the UA leg was
-    # processed, the gate declined.
-    assert result["outcome"] in ("declined", "cannot_satisfy"), result
-    text = result.get("reason", "") + result.get("advisory", "")
-    assert "UA" in text or "armed" in text.lower() or "not" in text.lower(), text
+    assert result["outcome"] == "cannot_satisfy", result
+    assert result.get("reason") == "invalid_request", result
+    assert "not a valid leg object" in (result.get("detail") or ""), result
 
 
 def test_negotiate_tracer_raises_negotiate_started_is_swallowed() -> None:

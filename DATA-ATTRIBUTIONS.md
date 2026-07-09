@@ -44,6 +44,17 @@ merged into the SEEDED demo catalog. Every such row is `provenance`-tagged
 (`gemini-2.5-flash-lite-grounded`) and marked `simulated:true`; prices are demo estimates,
 never live quotes.
 
+**Web-search-grounded enrichment (one-off, non-pipeline).** A small number of rows
+(task #86: Thimphu/Bhutan, Valletta/Malta, Victoria-Mahé/Seychelles — 22 lodging rows
+in `ucp-merchant/catalog_supplement.json`) were sourced the same way in spirit — real,
+currently-operating hotel/guesthouse names cross-checked against multiple independent
+listings (official hotel sites, Tripadvisor, Booking.com, Hotels.com) via live web
+search — but *not* through the `seed_lodgings_vertex.py` / Vertex-Gemini pipeline. They
+are `provenance`-tagged `claude-websearch-grounded` (a distinct tag, so the sourcing
+mechanism is never misattributed to the Gemini pipeline) and marked `simulated:true`;
+prices use the same tier+stars demo-estimate formula as the Gemini path, never a live
+quote.
+
 ---
 
 ## 2. Honesty disclosures (mandatory — do not remove)
