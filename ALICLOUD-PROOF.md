@@ -1,6 +1,6 @@
 # AliCloud / Alibaba Ecosystem Usage — Travel Guild Submission Proof
 
-**Last updated:** 2026-06-30
+**Last updated:** 2026-07-09
 **Purpose:** Verifiable evidence of Alibaba Cloud service integration in the Travel Guild submission. Every claim below maps to a file path and line number a judge can open in under 2 minutes.
 
 ---
@@ -118,48 +118,17 @@ SLS_LOGSTORE                        # SLS logstore name
 
 ## 3. KMS (Key Management Service) — Agent Signing Key Seam
 
-**Status: SEAM IN PLACE; NOT YET ACTIVATED in this repo** (see `.env.example`'s `UCP_KMS_ENABLED=0`).
+**Status: SEAM COMMENT IN PLACE IN THIS REPO; NO LIVE KMS CODE SHIPPED HERE.** The NHI (Non-Human Identity) agent signing key (RFC 9421 ES256 / EC P-256) is loaded from a plaintext PEM on disk (or an ephemeral in-memory key if no path is configured) — an honestly-acknowledged "long-lived key at rest" gap.
 
-The NHI (Non-Human Identity) agent signing key (RFC 9421 ES256 / EC P-256) is currently loaded from a plaintext PEM on disk (or an ephemeral in-memory key if no path is configured) — an honestly-acknowledged "long-lived key at rest" gap. The KMS seam is already cut: when `UCP_KMS_KEY_ID` is set, the load path swaps to either (a) KMS-envelope-decrypt the PEM into memory, or (b) an asymmetric KMS `Sign` call so the key never leaves KMS. Activating this on the live deployment is separate, parallel-track infrastructure work and does not gate this repo.
+### Seam location (as it actually exists in this repo)
 
-### Seam location
+`society/utils/ucp_signing.py`, `load_or_create_key()` docstring (lines 56–63): describes where a KMS-backed implementation would plug in (envelope-decrypt a KMS-wrapped PEM, or an asymmetric KMS `Sign` so the key never leaves KMS), and states plainly that "the live KMS call is intentionally NOT scaffolded here." That sentence is accurate for this exact file today — nothing more should be assumed from it.
 
-`society/utils/ucp_signing.py`, lines 56–62 (seam comment with both activation options).
+### What we actually attempted (in a separate, private repo — not shipped here)
 
-Excerpt:
-```python
-KMS SEAM (build-early / activate-late): the at-rest signing key on disk is
-the NHI long-lived-key edge. The KMS path plugs in HERE — when
-`UCP_KMS_KEY_ID` is set, replace the on-disk load with either (a) a KMS
-`Decrypt` of a KMS-wrapped PEM into memory, or (b) a KMS asymmetric `Sign`
-signer so the key never leaves KMS. Default (no env) keeps this on-disk
-behaviour unchanged.
-```
+In the project's private backend repo, we attempted to activate real KMS envelope-encryption for this seam. The account's KMS 3.0 instance turned out to be a **Dedicated KMS** instance, requiring a completely different SDK and auth model than the generic KMS SDK — `alibabacloud-dkms-gcs` with mutual-TLS client-certificate authentication, not AccessKey/Secret auth. The integration was rewritten correctly against the real, verified SDK API in both Python and Go, and passed an independent code audit. A live connection attempt with fully correct, real credentials confirmed the code and auth were right — the request reached AliCloud's infrastructure and was rejected for documented, specific reasons (`InvalidHeader` on one auth path, `UnsupportedOperation` on another), not a vague timeout or a bug in the code. What we could not do in the time available was complete a live encrypt→decrypt round-trip, which needs genuine private-network access to the instance.
 
-### Activation steps
-
-Steps (internal checklist, summarized here — not shipped as a separate doc in this repo):
-
-1. `pip install alibabacloud_kms20160120 alibabacloud_tea_openapi`
-2. Create an EC P-256 key in AliCloud KMS 3.0 console; record `UCP_KMS_KEY_ID`, region, endpoint.
-3. Set env (deploy-time, never hardcoded): `ALIBABA_CLOUD_ACCESS_KEY_ID/_SECRET`, `UCP_KMS_KEY_ID`, `UCP_KMS_ENDPOINT`, `UCP_KMS_ENABLED=1`.
-4. Implement at the seam (option 1: decrypt PEM; option 2: `KmsSigner` wrapping `AsymmetricSign`).
-5. Export the public JWK from KMS and point `ucp-merchant/signing.go` at it.
-6. Live sign → Go-side verify round-trip test before relying on it.
-
-### Why the KMS call is not pre-coded
-
-The KMS SDK (`alibabacloud_kms20160120`) and live KMS credentials are not both available yet to verify a sign/verify round-trip end-to-end. The project's thesis is "don't ship unverified security-critical code"; the seam is marked and the activation is a ~30-line task once both are in place.
-
-### Environment variables (activate-late)
-
-```
-UCP_KMS_ENABLED             # set to "1" to activate (default: off → on-disk PEM)
-UCP_KMS_KEY_ID              # KMS key id or ARN
-UCP_KMS_ENDPOINT            # KMS regional endpoint
-ALIBABA_CLOUD_ACCESS_KEY_ID # shared with SLS
-ALIBABA_CLOUD_ACCESS_KEY_SECRET
-```
+Rather than merge unverified security-critical code anywhere — public or private — we closed that work, released the KMS instance (ongoing cost, not earning its keep for this submission), and are documenting the attempt honestly here and in the Devpost submission's Challenges section, instead of either staying silent about it or claiming more progress than a live-verified round-trip.
 
 ---
 
@@ -174,6 +143,9 @@ The Qwen model served through the runtime container pulls from DashScope via `DA
 ### Evidence
 
 - `DASHSCOPE_API_KEY` is read from the environment; see `society/utils/model_router.py` and `society/utils/intent_parser.py` for the read sites (env var name only, never a value).
+- Screenshot of the live ECS instance's console page (Instance ID `i-t4n44gbij7622v7ecow4`, Status: Running, Zone: Singapore D, matching VPC/vSwitch bindings used throughout this proof): [`docs/alicloud-deployment-proof.png`](https://github.com/yuanhawk/travel-guild-submission/blob/main/docs/alicloud-deployment-proof.png)
+
+  ![AliCloud ECS instance running](docs/alicloud-deployment-proof.png)
 
 ---
 
@@ -279,7 +251,7 @@ This section collects every "not yet live" claim to let judges verify we never o
 
 | Service | Current state | What activates it | File / evidence |
 |---|---|---|---|
-| **KMS** | Seam in place; activation scheduled ~Jul 7 | `UCP_KMS_ENABLED=1` + creds + SDK | `society/utils/ucp_signing.py` L56–62 |
+| **KMS** | Seam comment only in this repo; activation attempted in the private backend repo, deferred (see §3) | Genuine VPC-network-verified live round-trip, then `UCP_KMS_ENABLED=1` + creds | `society/utils/ucp_signing.py` L56–63 |
 | **SLS cloud sink** | Local JSONL always works; SLS additionally when enabled | `SLS_ENABLED=1` + five SLS env vars | `society/utils/telemetry.py` L40–60 |
 | **AMap live enrichment** | `AMAP_ENABLED=0` (key-gated off) | Flip `AMAP_ENABLED=1` + insert API key | deploy-time env, not committed |
 | **Alipay real settlement** | Simulated (`"simulated": true` in every response) | Business-account PSP keypair (KIV) | `ucp-merchant/alipay_sim.go`; `ucp-merchant/mandate_vc.go` |
@@ -306,4 +278,4 @@ Open each file at the referenced line to confirm the claim in under 2 minutes:
 7. **Alipay sim note** → `ucp-merchant/alipay_sim.go:30` (`alipaySimNote` constant)
 8. **W3C-VC tier-2 label** → `ucp-merchant/mandate_vc.go:39–40` (KIV note in comment)
 9. **RFC 9421 signing** → `ucp-merchant/rfc9421.go` (full verifier); `society/utils/ucp_signing.py` (Python client)
-10. **KMS activation steps** → see the seam comment at `society/utils/ucp_signing.py` lines 56-62 (the full internal activation checklist is a planning document, not shipped in this repo)
+10. **AliCloud ECS deployment screenshot** → `docs/alicloud-deployment-proof.png` — Instance Details console page, Status: Running
