@@ -48,15 +48,15 @@ File: `society/utils/model_router.py`, lines 57–76 (profile definitions), 204�
 All three calls share the same design contract: closed-set output, one retry, determinism preserved (LLM only picks from a pre-filtered real-catalog set, never invents data).
 
 1. **Intent parse** — free-text trip request → structured `TripRequest`.
-   File: `society/utils/intent_parser.py`, line 65 (model constant), line 5809 (LLM call with `enable_thinking: False`).
+   File: `society/utils/intent_parser.py`, line 65 (model constant), line 5356 (LLM call with `enable_thinking: False`).
 
 2. **Vibe-to-area ranking** — qualitative vibe tokens → ranked real catalog areas.
-   File: `society/agents/destination_agent.py`, line 81 (model constant), line 432 (LLM call with `enable_thinking: False`).
+   File: `society/agents/destination_agent.py`, line 81 (model constant), line 434 (LLM call with `enable_thinking: False`).
 
 3. **Accommodation candidate ranking** — ranked shortlist of seeded hotels by (vibe, preference).
-   File: `society/agents/accommodation_agent.py`, line 184 (model constant), line 248 (LLM call with `enable_thinking: False`).
+   File: `society/agents/accommodation_agent.py`, line 196 (model constant `_RANKING_MODEL`), line 282 (LLM call with `enable_thinking: False`).
 
-Additional LLM roles (same endpoint, same `enable_thinking: False` guard): itinerary narrator (`society/utils/itinerary_narrator.py` line 114), follow-up parser (`society/utils/followup_parser.py` line 158), aftercare translation (`society/utils/aftercare_lang.py` line 103), coverage-gap notes (`society/utils/coverage_gap.py` line 483), fraud agent (`society/agents/fraud_agent.py` line 665), health agent (`society/agents/health_agent.py` line 3876), risk agent (`society/agents/risk_agent.py` line 7691), insurance agent (`society/agents/insurance_agent.py` line 794).
+Additional LLM roles (same endpoint, same `enable_thinking: False` guard): itinerary narrator (`society/utils/itinerary_narrator.py` line 89), follow-up parser (`society/utils/followup_parser.py` line 214), aftercare translation (`society/utils/aftercare_lang.py` line 109), coverage-gap notes (`society/utils/coverage_gap.py` line 490), fraud agent (`society/agents/fraud_agent.py` line 665), health agent (`society/agents/health_agent.py` line 4071), risk agent (`society/agents/risk_agent.py` line 7719), insurance agent (`society/agents/insurance_agent.py` line 832).
 
 ### `enable_thinking: False` invariant test
 
@@ -122,7 +122,7 @@ SLS_LOGSTORE                        # SLS logstore name
 
 ### Seam location (as it actually exists in this repo)
 
-`society/utils/ucp_signing.py`, `load_or_create_key()` docstring (lines 56–63): describes where a KMS-backed implementation would plug in (envelope-decrypt a KMS-wrapped PEM, or an asymmetric KMS `Sign` so the key never leaves KMS), and states plainly that "the live KMS call is intentionally NOT scaffolded here." That sentence is accurate for this exact file today — nothing more should be assumed from it.
+`society/utils/ucp_signing.py`, `load_or_create_key()` docstring (lines 53–63): describes where a KMS-backed implementation would plug in (envelope-decrypt a KMS-wrapped PEM, or an asymmetric KMS `Sign` so the key never leaves KMS), and states plainly that "the live KMS call is intentionally NOT scaffolded here." That sentence is accurate for this exact file today — nothing more should be assumed from it.
 
 ### What we actually attempted (in a separate, private repo — not shipped here)
 
@@ -158,7 +158,7 @@ AMap serves two roles:
 
 Inside China (`iso2 == "CN"`), the dining-reviews dispatch prefers AMap over Google as the map data provider.
 
-File: `society/orchestration/orchestrator.py`, line 4239:
+File: `society/orchestration/orchestrator.py`, line 4818:
 
 ```python
 provider = "amap" if iso2 == "CN" else "google"
@@ -269,10 +269,10 @@ All KIV items are labeled inline in code — the project's honesty contract ("fa
 Open each file at the referenced line to confirm the claim in under 2 minutes:
 
 1. **DashScope API URL** → `society/utils/model_router.py:52` — `dashscope-intl.aliyuncs.com`
-2. **`enable_thinking: False` guard** → `society/utils/intent_parser.py:5809` (intent parse call)
+2. **`enable_thinking: False` guard** → `society/utils/intent_parser.py:5356` (intent parse call)
 3. **SLS `PutLogs` call** → `society/utils/telemetry.py:47–60` (`_emit_sls` function)
-4. **KMS seam comment** → `society/utils/ucp_signing.py:56–62`
-5. **AMap CN routing** → `society/orchestration/orchestrator.py:4239`
+4. **KMS seam comment** → `society/utils/ucp_signing.py:53–63`
+5. **AMap CN routing** → `society/orchestration/orchestrator.py:4818`
 6. **AMap URL builder** → `society/utils/booking_links.py:434–438`
 7. **Alipay sim note** → `ucp-merchant/alipay_sim.go:30` (`alipaySimNote` constant)
 8. **W3C-VC tier-2 label** → `ucp-merchant/mandate_vc.go:39–40` (KIV note in comment)
