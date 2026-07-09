@@ -46,23 +46,25 @@ describe('session / preferences API', () => {
     expect(p.home_currency).toBe('SGD');
   });
 
-  // SECURITY (Phase 1 of the GET /preferences IDOR follow-up — see
-  // society/orchestration/server.py "SECURITY FOLLOW-UP"): thread session_token
-  // so the backend can be gated (Phase 2) without another FE change.
-  it('getPreferences sends session_token in the query string when provided', async () => {
+  // SECURITY (secrets-in-URL fix): session_token is a bearer-equivalent secret,
+  // so it rides as the x-session-token request header, never a query param
+  // (see society/orchestration/server.py "SECURITY FOLLOW-UP" / api.ts _authHeaders).
+  it('getPreferences sends session_token as the x-session-token request header', async () => {
     const f = mockFetch(200, { ...U, prefs: {} }); vi.stubGlobal('fetch', f);
     await getPreferences('demo-mei', 'sess-tok-123');
-    const url = (f as unknown as Mocked).mock.calls[0][0] as string;
+    const [url, init] = (f as unknown as Mocked).mock.calls[0];
     expect(url).toContain('/preferences?user_id=demo-mei');
-    expect(url).toContain('session_token=sess-tok-123');
+    expect(url).not.toContain('session_token');
+    expect(new Headers(init?.headers).get('x-session-token')).toBe('sess-tok-123');
   });
 
-  it('getPreferences URL is still well-formed with no session_token (backward compat — backend not yet gated)', async () => {
+  it('getPreferences URL is still well-formed with no session_token (no header sent)', async () => {
     const f = mockFetch(200, { ...U, prefs: {} }); vi.stubGlobal('fetch', f);
     await getPreferences('demo-mei');
-    const url = (f as unknown as Mocked).mock.calls[0][0] as string;
+    const [url, init] = (f as unknown as Mocked).mock.calls[0];
     expect(url).toBe(`${url.split('?')[0]}?user_id=demo-mei`); // exactly one param, no dangling '&' or empty session_token key
     expect(url).not.toContain('session_token');
+    expect(new Headers(init?.headers).has('x-session-token')).toBe(false);
   });
 
   it('putPreferences PUTs the profile (update-only)', async () => {

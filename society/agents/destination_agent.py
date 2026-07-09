@@ -441,10 +441,13 @@ def _llm_call(city: str, vibe: str | None, allowed_areas: list[str]) -> str:
         content = data["choices"][0]["message"]["content"]
         return content if isinstance(content, str) else json.dumps(content)
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(
-            f"DashScope API error HTTP {e.response.status_code}: "
-            f"{e.response.text[:300]}"
+        # SECURITY: log the raw upstream response body server-side only — never
+        # embed it in the exception message (see intent_parser.py's matching fix).
+        logger.warning(
+            "DashScope API error HTTP %s: %s",
+            e.response.status_code, e.response.text[:300],
         )
+        raise RuntimeError(f"DashScope API error HTTP {e.response.status_code}")
     except (KeyError, IndexError) as e:
         raise RuntimeError(f"Unexpected DashScope response shape: {e}")
 

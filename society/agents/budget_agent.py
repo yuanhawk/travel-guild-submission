@@ -99,13 +99,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-import socket
 import uuid
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from utils import ucp_signing
+from utils.ssrf_guard import validate_outbound_url
 import uvicorn
 
 from agents.a2a_agent import (
@@ -128,33 +127,26 @@ MERCHANT_MCP_URL = os.environ.get(
 
 
 def _validate_merchant_url(url: str) -> None:
-    """SSRF-001: startup-time guard for MERCHANT_MCP_URL.
+    """SSRF-001: guard for MERCHANT_MCP_URL, called both at import time and
+    immediately before every outbound POST (see _merchant_post below — closes
+    a DNS-rebinding TOCTOU gap: a hostname that resolves benignly at import
+    time could later be rebound to a metadata IP).
 
-    Scheme must be http or https.
-    Link-local / metadata addresses (169.254.0.0/16) are blocked —
-    these include AWS/GCP/Azure/Oracle IMDS endpoints.
-    Private RFC-1918 addresses (10.x, 172.16-31.x, 192.168.x) are
-    ALLOWED because the Go merchant lives on a private cluster IP.
-    Unresolvable hostnames (cluster-internal DNS names that are not
-    reachable from the dev box) are allowed.
+    Delegates to utils.ssrf_guard.validate_outbound_url — the SAME function
+    accommodation_agent.py and critic_agent.py now call for the identical
+    env var, so all three agents enforce one consistent policy (a security
+    audit found this guard previously existed ONLY here, giving zero
+    protection to the other two agents' separate processes).
+
+    Scheme must be http or https. Link-local / metadata addresses (IPv4
+    169.254.0.0/16 AND IPv6 fe80::/10) are blocked — these include AWS/GCP/
+    Azure/Oracle IMDS endpoints. Private RFC-1918 addresses (10.x, 172.16-
+    31.x, 192.168.x) are ALLOWED because the Go merchant lives on a private
+    cluster IP. Unresolvable hostnames (cluster-internal DNS names that are
+    not reachable from the dev box) are allowed.
     """
     try:
-        parts = urlparse(url)
-        if parts.scheme not in ("http", "https"):
-            raise ValueError(
-                f"MERCHANT_MCP_URL scheme must be http or https, got: {parts.scheme!r}"
-            )
-        hostname = parts.hostname or ""
-        try:
-            resolved_ip = socket.gethostbyname(hostname)
-            # Block link-local / IMDS (169.254.0.0/16).
-            if resolved_ip.startswith("169.254."):
-                raise ValueError(
-                    f"MERCHANT_MCP_URL resolves to link-local/metadata address "
-                    f"{resolved_ip!r} — SSRF-001 block (IMDS at 169.254.169.254)"
-                )
-        except socket.gaierror:
-            pass  # Unresolvable cluster-internal hostname → allow
+        validate_outbound_url(url, param_name="MERCHANT_MCP_URL")
     except ValueError:
         raise
     except Exception as exc:
@@ -312,6 +304,10 @@ def _mcp_rpc(
     Returns (structured_content_dict, http_status_code).
     Raises httpx.HTTPError on connection failure.
     """
+    # SSRF-001 TOCTOU fix: re-validate immediately before every outbound call,
+    # not just once at import time — a hostname that resolved benignly at
+    # import time could be DNS-rebound to a metadata address by now.
+    _validate_merchant_url(MERCHANT_MCP_URL)
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),

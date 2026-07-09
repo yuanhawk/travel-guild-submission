@@ -168,16 +168,45 @@ class _BodySizeLimitMiddleware:
 
 
 class _RateLimiter:
-    """Token-bucket per-IP rate limiter.  Thread-safe (used from async context)."""
+    """Token-bucket per-IP rate limiter.  Thread-safe (used from async context).
+
+    SECURITY (DoS fix): `_buckets` used to grow by one entry per distinct
+    source IP EVER seen, for the life of the process, with nothing ever
+    evicting old entries — a remote caller presenting many distinct IPs (a
+    botnet, or simply rotating through IPv6 addresses) had a free unbounded-
+    memory-growth primitive, independent of the per-IP limit itself. Mirrors
+    the orphan-sweep pattern already used for `_state.queues`/`_state.queue_ts`
+    (STREAM_QUEUE_TTL_S): a lazy, periodic sweep drops any bucket that hasn't
+    been touched in `_BUCKET_TTL_S`, so the dict's steady-state size is bounded
+    by "distinct IPs active in the last TTL window", not "distinct IPs ever
+    seen". The sweep itself only runs at most once per `_SWEEP_INTERVAL_S`
+    (not on every call) so it adds no per-request overhead in the common case.
+    """
+
+    _BUCKET_TTL_S = 600.0     # evict a bucket idle for longer than this
+    _SWEEP_INTERVAL_S = 60.0  # how often to run the O(n) eviction pass
 
     def __init__(self, per_minute: int) -> None:
         self._per_min = float(per_minute)
         self._buckets: dict[str, tuple[float, float]] = {}  # ip → (tokens, last_time)
         self._lock = threading.Lock()
+        self._last_sweep = time.monotonic()
+
+    def _sweep_expired_locked(self, now: float) -> None:
+        """Caller must hold self._lock. Evicts buckets idle > _BUCKET_TTL_S,
+        at most once per _SWEEP_INTERVAL_S."""
+        if now - self._last_sweep < self._SWEEP_INTERVAL_S:
+            return
+        self._last_sweep = now
+        stale = [ip for ip, (_, last) in self._buckets.items()
+                 if now - last > self._BUCKET_TTL_S]
+        for ip in stale:
+            del self._buckets[ip]
 
     def allow(self, ip: str) -> bool:
         now = time.monotonic()
         with self._lock:
+            self._sweep_expired_locked(now)
             tokens, last = self._buckets.get(ip, (self._per_min, now))
             elapsed = now - last
             tokens = min(self._per_min, tokens + elapsed * (self._per_min / 60.0))
@@ -189,16 +218,23 @@ class _RateLimiter:
 
 
 class _RateLimitMiddleware:
-    """SEC-001 / denial-of-wallet: generous per-IP rate limit on POSTs AND on the
-    BILLABLE GET path(s).
+    """SEC-001 / denial-of-wallet: generous per-IP rate limit on POSTs/PUTs AND
+    on the BILLABLE or ownership/session-token-bearing GET path(s).
 
     Default 120/min (SOCIETY_RATE_PER_MIN).  Sends 429 on excess.
-    Limited: every POST, PLUS GET /place_photo — each cache-miss on that GET hits
-    Google Places (a paid call), so before this it was the one billable path with
-    NO per-IP ceiling (a scraper could run up an unbounded Places bill once the auth
-    wall drops). Exempt: all other GETs — cheap/SSE/static (/health, /stream/*,
-    /trips, /emergencies, /, /kanban.js) are never billable and must not be
-    throttled. Generous enough that a Playwright/e2e run or a judge demo never trips.
+    Limited: every POST and PUT, PLUS GET /place_photo — each cache-miss on
+    that GET hits Google Places (a paid call), so before this it was the one
+    billable path with NO per-IP ceiling (a scraper could run up an unbounded
+    Places bill once the auth wall drops) — PLUS the GETs that gate access via
+    a session_token/owner_token header (/trips, /trips/{key}, /preferences,
+    /telegram/link): a security audit found these exempt too, removing a
+    defense-in-depth throttle against brute-force token guessing (the tokens
+    themselves are cryptographically strong, so this wasn't practically
+    exploitable today, but the exemption was accidental, not a deliberate
+    policy, so we close it here rather than merely document it). Exempt: all
+    other GETs — cheap/SSE/static (/health, /stream/*, /emergencies, /,
+    /kanban.js) are never billable/sensitive and must not be throttled.
+    Generous enough that a Playwright/e2e run or a judge demo never trips.
     """
 
     # GETs that can trigger a BILLABLE paid downstream (Google Places) and so ride
@@ -206,6 +242,10 @@ class _RateLimitMiddleware:
     # is NOT part of scope["path"]. POST /place_card is already covered by the POST
     # rule; only the photo-proxy GET needs listing here.
     _BILLABLE_GET_PATHS = frozenset({"/place_photo"})
+    # GETs gated behind a session_token/owner_token header (see auth headers on
+    # trips_list/trips_detail/preferences/telegram_link) — rate-limited as a
+    # defense-in-depth brute-force throttle, not because they're billable.
+    _TOKEN_GATED_GET_PATHS = frozenset({"/trips", "/preferences", "/telegram/link"})
 
     def __init__(self, app: Any, per_minute: int = 120) -> None:
         self._app = app
@@ -216,10 +256,16 @@ class _RateLimitMiddleware:
             await self._app(scope, receive, send)
             return
         method = scope.get("method")
-        # Rate-limit every POST, plus the billable GET(s); pass everything else
-        # (cheap/SSE/static GETs) straight through so judging is never throttled.
-        limited = method == "POST" or (
-            method == "GET" and scope.get("path", "") in self._BILLABLE_GET_PATHS
+        path = scope.get("path", "")
+        # Rate-limit every POST/PUT, plus the billable/token-gated GET(s); pass
+        # everything else (cheap/SSE/static GETs) straight through so judging
+        # is never throttled.
+        limited = method in ("POST", "PUT") or (
+            method == "GET" and (
+                path in self._BILLABLE_GET_PATHS
+                or path in self._TOKEN_GATED_GET_PATHS
+                or path.startswith("/trips/")  # /trips/{idempotency_key}
+            )
         )
         if not limited:
             await self._app(scope, receive, send)
@@ -237,11 +283,11 @@ class _RateLimitMiddleware:
 
 
 class _TokenAuthMiddleware:
-    """SEC-001: OPTIONAL Bearer-token auth on POST routes.
+    """SEC-001: OPTIONAL Bearer-token auth on POST/PUT (mutating) routes.
 
     OFF by default (SOCIETY_API_TOKEN unset → fully open, judges unaffected).
-    When set, POST requests without a matching `Authorization: Bearer <token>`
-    header receive 401.  GET routes and /health are always exempt.
+    When set, POST/PUT requests without a matching `Authorization: Bearer
+    <token>` header receive 401. GET routes and /health are always exempt.
     Do NOT hard-lock public /negotiate*/dashboard endpoints here — use env only
     when deploying a private staging environment.
     """
@@ -253,7 +299,7 @@ class _TokenAuthMiddleware:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if (not self._token
                 or scope["type"] != "http"
-                or scope.get("method") != "POST"):
+                or scope.get("method") not in ("POST", "PUT")):
             await self._app(scope, receive, send)
             return
         headers = dict(scope.get("headers", []))
@@ -1452,6 +1498,14 @@ async def negotiate(request: Request) -> JSONResponse:
     _raw_uid = body.get("user_id")
     body["real_user_id"] = _raw_uid.strip() if isinstance(_raw_uid, str) else ""
 
+    # SECURITY: forgeable-consent-token fix — a raw client-supplied consent_tokens
+    # dict is NEVER trusted as-is (fraud_agent.py's parser is intentionally
+    # unsigned/pure — see its module docstring). Only tokens this process itself
+    # signed via POST /consent for this exact session survive; see
+    # _filter_verified_consent_tokens's docstring.
+    body["consent_tokens"] = _filter_verified_consent_tokens(
+        body.get("consent_tokens"), (body.get("session_token") or "").strip())
+
     # Ensure user_id is present (browser form omits it).
     if not body.get("user_id"):
         body["user_id"] = str(uuid4())
@@ -1551,11 +1605,16 @@ async def negotiate(request: Request) -> JSONResponse:
             try:
                 result = _state.orch.negotiate(
                     trip_request, commit=not bool(trip_request.get("plan")))  # #1 consent split
-            except Exception as exc:
+            except Exception:
+                # SECURITY: never echo str(exc) to the client — an unexpected exception
+                # deep in the orchestrator/agent pipeline can carry internal field/
+                # variable names, file paths, or third-party library error text. Log the
+                # real exception server-side only; the client gets a generic message.
+                _log.exception("negotiate: unhandled exception in worker")
                 result = {
                     "outcome": "cannot_satisfy",
                     "reason": "server_error",
-                    "detail": str(exc),
+                    "detail": "An internal error occurred while planning this trip.",
                 }
             finally:
                 _state.orch._tracer = lambda *a, **kw: None  # reset to no-op
@@ -1757,8 +1816,12 @@ async def negotiate_text(request: Request) -> JSONResponse:
                         memory_verified_user_id=memory_verified_user_id,  # M1 follow-up
                         real_user_id=real_user_id,  # C1 fix
                     )
-                except Exception as exc:
-                    result = {"outcome": "cannot_satisfy", "reason": "server_error", "detail": str(exc)}
+                except Exception:
+                    # SECURITY: never echo str(exc) to the client — see _run_negotiate's
+                    # matching comment above.
+                    _log.exception("negotiate_text (stream): unhandled exception in worker")
+                    result = {"outcome": "cannot_satisfy", "reason": "server_error",
+                               "detail": "An internal error occurred while planning this trip."}
                 finally:
                     _state.orch._tracer = lambda *a, **kw: None
             result = _persist_and_sanitize_plan(result, body)  # #1 persist HELD plan + strip server-only
@@ -1794,11 +1857,14 @@ async def negotiate_text(request: Request) -> JSONResponse:
                     memory_verified_user_id=memory_verified_user_id,  # M1 follow-up
                     real_user_id=real_user_id,  # C1 fix
                 )
-            except Exception as exc:
+            except Exception:
+                # SECURITY: never echo str(exc) to the client — see _run_negotiate's
+                # matching comment above.
+                _log.exception("negotiate_text (blocking): unhandled exception in worker")
                 return {
                     "outcome": "cannot_satisfy",
                     "reason": "server_error",
-                    "detail": str(exc),
+                    "detail": "An internal error occurred while planning this trip.",
                 }
 
     result = await _state.loop.run_in_executor(
@@ -2335,8 +2401,12 @@ async def confirm(request: Request) -> JSONResponse:
                         dest_token=row.get("dest_token", ""),
                         merchant_user_id=_mid,
                     )
-                except Exception as exc:  # noqa: BLE001 — degrade to a terminal, never a 500
-                    return {"outcome": "cannot_satisfy", "reason": "server_error", "detail": str(exc)}
+                except Exception:  # noqa: BLE001 — degrade to a terminal, never a 500
+                    # SECURITY: never echo str(exc) to the client — see _run_negotiate's
+                    # matching comment above.
+                    _log.exception("confirm: unhandled exception in _commit")
+                    return {"outcome": "cannot_satisfy", "reason": "server_error",
+                             "detail": "An internal error occurred while confirming this booking."}
 
         # L4 — dedicated mgmt pool: a /confirm must never queue behind N
         # concurrent /negotiate stream workers occupying `executor`.
@@ -2480,8 +2550,12 @@ async def preferences(request: Request) -> JSONResponse:
         # oracle). web/'s getPreferences() now threads
         # session_token through (Phase 1, merged), so this no longer breaks
         # the live prefs-load flow.
+        # SECURITY (secrets-in-URL fix): session_token rides as the
+        # X-Session-Token request header, NOT a query param — a bearer-
+        # equivalent 8h credential must never land in an access log, browser
+        # history, or a Referer header sent to a cross-origin resource.
         from utils.session_token import verify_session
-        session_token = (request.query_params.get("session_token") or "").strip()
+        session_token = (request.headers.get("x-session-token") or "").strip()
         if not verify_session(session_token, uid):
             return JSONResponse(
                 {"error": "unauthorized", "reason": "Invalid or expired session — please log in again."},
@@ -2493,9 +2567,10 @@ async def preferences(request: Request) -> JSONResponse:
         return JSONResponse(_profile_view(u))
     # PUT — update an EXISTING user only (no register). Session-token ownership is
     # enforced below (verify_session); prefs.lang is validated at the point it's
-    # consumed (aftercare_lang.resolve_lang's BCP-47 shape check). The rate-limit
-    # middleware only covers POST today, not PUT/PATCH -- lower-severity than an
-    # auth gap, tracked as a follow-up rather than blocking.
+    # consumed (aftercare_lang.resolve_lang's BCP-47 shape check). SECURITY FIX:
+    # the rate-limit AND optional Bearer-token-auth middlewares now both cover
+    # PUT too (previously POST-only — an audit found PUT /preferences silently
+    # bypassed both).
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -2561,8 +2636,10 @@ async def telegram_link(request: Request) -> JSONResponse:
     # claimed user_id (it mints a channel-hijack-capable link token), so a bare
     # user_id query param is not authorization. Require proof of session
     # possession (issued via POST /session/login) before minting a link token.
+    # SECURITY (secrets-in-URL fix): session_token rides as the X-Session-Token
+    # request header, NOT a query param — see preferences()'s matching comment.
     from utils.session_token import verify_session
-    session_token = (request.query_params.get("session_token") or "").strip()
+    session_token = (request.headers.get("x-session-token") or "").strip()
     if not verify_session(session_token, user_id):
         return JSONResponse(
             {"outcome": "unauthorized", "reason": "Invalid or expired session — please log in again."},
@@ -2583,6 +2660,95 @@ async def telegram_link(request: Request) -> JSONResponse:
         "deep_link": f"https://t.me/{bot_username}?start={token}",
         "expires_in_seconds": _TOKEN_TTL_SECONDS,
     })
+
+
+async def consent_grant(request: Request) -> JSONResponse:
+    """POST /consent  {user_id, session_token, counterparty_id}
+
+    SECURITY: the ONLY way to obtain a Fraud consent-override token that
+    /negotiate will actually honor. fraud_agent.py's consent-token parser is a
+    deliberately pure/unsigned string check (by design — see its module
+    docstring), so a client could otherwise just type
+    "consent:{counterparty_id}:{risk_band}:{nonce}" and hand it straight to
+    /negotiate. This endpoint requires proof of session possession (the SAME
+    verify_session bar as PUT /preferences / GET /telegram/link) before it
+    will mint a server-signed grant (utils/consent_grant.mint_consent_grant)
+    bound to (counterparty_id, the CURRENT observed risk_band, session_token).
+    /negotiate verifies that signature before letting any consent_token reach
+    fraud.vet / the Critic's re-check — see _filter_verified_consent_tokens.
+
+    Returns {"error": "no_consent_required", ...} if the counterparty is
+    currently committable without consent (nothing to grant).
+    """
+    try:
+        body: dict[str, Any] = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid request", "detail": "body must be a JSON object"}, status_code=400)
+
+    user_id = (body.get("user_id") or "").strip()
+    session_token = (body.get("session_token") or "").strip()
+    counterparty_id = (body.get("counterparty_id") or "").strip()
+    if not user_id or not counterparty_id:
+        return JSONResponse(
+            {"error": "invalid request", "detail": "user_id and counterparty_id are required"},
+            status_code=400,
+        )
+
+    from utils.session_token import verify_session
+    if not verify_session(session_token, user_id):
+        return JSONResponse(
+            {"error": "unauthorized", "detail": "Invalid or expired session — please log in again."},
+            status_code=401,
+        )
+
+    from agents.fraud_agent import vet_counterparty, is_committable_band
+    verdict = vet_counterparty(counterparty_id)
+    band = verdict["risk_band"]
+    if is_committable_band(band):
+        return JSONResponse(
+            {"error": "no_consent_required",
+             "detail": f"counterparty {counterparty_id!r} is currently {band!r} and committable without consent"},
+            status_code=400,
+        )
+
+    from utils.consent_grant import mint_consent_grant
+    token = mint_consent_grant(counterparty_id, band, session_token)
+    return JSONResponse({
+        "counterparty_id": counterparty_id,
+        "risk_band": band,
+        "consent_token": token,
+        "expires_in_seconds": 900,
+    })
+
+
+def _filter_verified_consent_tokens(raw: Any, session_token: str) -> dict[str, str]:
+    """
+    Only pass through consent_tokens that were actually minted by POST /consent
+    for THIS session (utils/consent_grant.verify_consent_grant). Everything
+    else — including a hand-typed "consent:{cid}:{band}:{nonce}" string that
+    would otherwise satisfy fraud_agent.py's intentionally unsigned parser — is
+    dropped here, at the HTTP boundary, before it can reach fraud.vet or the
+    Critic's re-check. fraud_agent.py's own contract/tests are untouched; this
+    is purely an inbound allow-list.
+    """
+    if not isinstance(raw, dict) or not session_token:
+        return {}
+    from utils.consent_grant import verify_consent_grant
+    verified: dict[str, str] = {}
+    for cid, token in raw.items():
+        if not isinstance(cid, str) or not isinstance(token, str):
+            continue
+        parts = token.strip().split(":")
+        if len(parts) != 4:
+            continue
+        _scheme, _tok_cid, tok_band, _nonce = parts
+        if verify_consent_grant(
+            token, counterparty_id=cid, risk_band=tok_band, session_token=session_token,
+        ):
+            verified[cid] = token
+    return verified
 
 
 async def refine(request: Request) -> JSONResponse:
@@ -2779,8 +2945,12 @@ async def refine(request: Request) -> JSONResponse:
                         intent_parser.attach_assumption_notes(new_request, res)
                         res["_trip_request"] = new_request
                     return res
-                except Exception as exc:
-                    return {"outcome": "cannot_satisfy", "reason": "server_error", "detail": str(exc)}
+                except Exception:
+                    # SECURITY: never echo str(exc) to the client — see _run_negotiate's
+                    # matching comment above.
+                    _log.exception("refine: unhandled exception in _do_replan")
+                    return {"outcome": "cannot_satisfy", "reason": "server_error",
+                             "detail": "An internal error occurred while refining this trip."}
 
         result = await _state.loop.run_in_executor(_state.executor, _do_replan)
         # Ownership continuity (IDOR fix, tier 2): the re-plan mints a NEW
@@ -3451,8 +3621,8 @@ async def cancel(request: Request) -> JSONResponse:
 
 
 async def trips_list(request: Request) -> JSONResponse:
-    """GET /trips?user_id=<id>&session_token=<token>  — saved trips list for a demo
-    user (ordered desc by created_at).
+    """GET /trips?user_id=<id>  (X-Session-Token header)  — saved trips list for a
+    demo user (ordered desc by created_at).
 
     SECURITY (read-IDOR fix, sibling of #154/#155): user_id alone is NOT proof of
     identity — the 5 demo user_ids are small and trivially guessable
@@ -3462,12 +3632,14 @@ async def trips_list(request: Request) -> JSONResponse:
     GET /telegram/link (server.py). The session check runs BEFORE any store
     lookup, so a failed check never distinguishes "wrong session" from "no such
     user" (matches those two endpoints' convention — no existence oracle).
+    SECURITY (secrets-in-URL fix): session_token rides as the X-Session-Token
+    request header, NOT a query param.
     """
     user_id = (request.query_params.get("user_id") or "").strip()
     if not user_id:
         return JSONResponse({"outcome": "invalid_request", "reason": "user_id is required"}, status_code=400)
     from utils.session_token import verify_session
-    session_token = (request.query_params.get("session_token") or "").strip()
+    session_token = (request.headers.get("x-session-token") or "").strip()
     if not verify_session(session_token, user_id):
         return JSONResponse(
             {"outcome": "unauthorized", "reason": "Invalid or expired session — please log in again."},
@@ -3479,20 +3651,22 @@ async def trips_list(request: Request) -> JSONResponse:
 
 
 async def trips_detail(request: Request) -> JSONResponse:
-    """GET /trips/{idempotency_key}?session_token=&owner_token=  — the sanitised
-    stored envelope for one trip.
+    """GET /trips/{idempotency_key}  (X-Session-Token / X-Owner-Token headers)  —
+    the sanitised stored envelope for one trip.
 
     SECURITY (IDOR follow-up to #154, was the read-only sibling of STORE-002):
     a trip envelope is owner-private. The two-tier ownership gate
-    (_authorize_trip_action) is reused verbatim, but identity arrives as QUERY
-    PARAMS on this GET (session_token for logged-in trips, owner_token for anon
-    trips) — see GET /telegram/link for the established GET-param pattern. On a
-    denied read we return the SAME 404 not_found shape as the unknown-key branch
-    (NOT the write endpoints' 403 not_trip_owner): the idempotency_key is a
-    deterministic request digest, so a 403 would confirm the trip EXISTS to a
-    non-owner (an existence oracle). 404 leaks nothing — "not yours" is
-    indistinguishable from "no such trip". The client maps any non-2xx to null
-    (api.ts getTrip) either way, so there is no UX cost to the stronger posture.
+    (_authorize_trip_action) is reused verbatim, but identity arrives as
+    REQUEST HEADERS on this GET (X-Session-Token for logged-in trips,
+    X-Owner-Token for anon trips) rather than query params — bearer-equivalent
+    secrets must never land in an access log, browser history, or a Referer
+    header (secrets-in-URL fix). On a denied read we return the SAME 404
+    not_found shape as the unknown-key branch (NOT the write endpoints' 403
+    not_trip_owner): the idempotency_key is a deterministic request digest, so
+    a 403 would confirm the trip EXISTS to a non-owner (an existence oracle).
+    404 leaks nothing — "not yours" is indistinguishable from "no such trip".
+    The client maps any non-2xx to null (api.ts getTrip) either way, so there
+    is no UX cost to the stronger posture.
 
     _confirm_ctx and checkout_id are NEVER echoed (stripped at save time by
     _persist_and_sanitize_plan; re-stripped here belt-and-suspenders).
@@ -3505,14 +3679,14 @@ async def trips_detail(request: Request) -> JSONResponse:
     _not_found = JSONResponse({"error": "not_found", "idempotency_key": idk}, status_code=404)
     if row is None:
         return _not_found
-    # Ownership gate — reuse the #154 two-tier decision. Identity is in query
-    # params on a GET, adapted into the dict bag _authorize_trip_action reads via
+    # Ownership gate — reuse the #154 two-tier decision. Identity is in request
+    # headers on a GET, adapted into the dict bag _authorize_trip_action reads via
     # dict.get (_str_field coerces None/missing → ""). We use only its DECISION
     # (None = authorized); a denial is rendered as 404 (existence-hiding), not the
     # function's own 403 — see the docstring.
     auth = {
-        "session_token": request.query_params.get("session_token"),
-        "owner_token": request.query_params.get("owner_token"),
+        "session_token": request.headers.get("x-session-token"),
+        "owner_token": request.headers.get("x-owner-token"),
     }
     if _authorize_trip_action(row, auth, idk) is not None:
         return _not_found
@@ -3626,6 +3800,7 @@ def build_app() -> Starlette:
         Route("/session/login", session_login, methods=["POST"]),
         Route("/preferences", preferences, methods=["GET", "PUT"]),
         Route("/telegram/link", telegram_link, methods=["GET"]),
+        Route("/consent", consent_grant, methods=["POST"]),
         Route("/stream/{stream_id}", stream, methods=["GET"]),
         Route("/emergencies", emergencies, methods=["GET"]),
         Route("/aftercare/check", aftercare_check, methods=["POST"]),

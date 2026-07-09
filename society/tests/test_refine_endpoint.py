@@ -708,8 +708,8 @@ class TestTripsIsolation(unittest.TestCase):
         with client:
             alice_token = _login(client, "demo-mei")
             bob_token = _login(client, "demo-alex")
-            ra = client.get(f"/trips?user_id=demo-mei&session_token={alice_token}")
-            rb = client.get(f"/trips?user_id=demo-alex&session_token={bob_token}")
+            ra = client.get("/trips?user_id=demo-mei", headers={"X-Session-Token": alice_token})
+            rb = client.get("/trips?user_id=demo-alex", headers={"X-Session-Token": bob_token})
 
         self.assertEqual(ra.status_code, 200, ra.text)
         self.assertEqual(rb.status_code, 200, rb.text)
@@ -749,7 +749,7 @@ class TestTripsIsolation(unittest.TestCase):
         client, _ = self._make_client_and_store()
         with client:
             token = _login(client, "demo-jack")
-            r = client.get(f"/trips?user_id=demo-jack&session_token={token}")
+            r = client.get("/trips?user_id=demo-jack", headers={"X-Session-Token": token})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(r.json().get("trips"), [],
                          "user with no trips should have an empty trips list")

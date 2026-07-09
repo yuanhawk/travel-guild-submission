@@ -267,7 +267,7 @@ class TestTripsEndpoints(unittest.TestCase):
         client = TestClient(server.build_app())
         with client:
             token = _login(client, _USER_ID)  # IDOR fix: session proof required
-            r = client.get(f"/trips?user_id={_USER_ID}&session_token={token}")
+            r = client.get(f"/trips?user_id={_USER_ID}", headers={"X-Session-Token": token})
         self.assertEqual(r.status_code, 200)
         body = r.json()
         trips = body.get("trips") or []
@@ -291,7 +291,7 @@ class TestTripsEndpoints(unittest.TestCase):
         client = TestClient(server.build_app())
         with client:
             token = _login(client, "demo-alex")
-            r = client.get(f"/trips?user_id=demo-alex&session_token={token}")
+            r = client.get("/trips?user_id=demo-alex", headers={"X-Session-Token": token})
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertEqual(body.get("trips"), [])
@@ -325,7 +325,7 @@ class TestTripsEndpoints(unittest.TestCase):
         client = TestClient(server.build_app())
         with client:
             token = _login(client, "demo-mei")
-            r = client.get(f"/trips/trip-detail-01?session_token={token}")
+            r = client.get("/trips/trip-detail-01", headers={"X-Session-Token": token})
         self.assertEqual(r.status_code, 200)
         body = r.json()
         self.assertEqual(body.get("idempotency_key"), "trip-detail-01")
@@ -369,7 +369,7 @@ class TestTripsEndpoints(unittest.TestCase):
         client = TestClient(server.build_app())
         with client:
             token = _login(client, "demo-mei")
-            r = client.get(f"/trips/trip-ctx-test?session_token={token}")
+            r = client.get("/trips/trip-ctx-test", headers={"X-Session-Token": token})
         self.assertEqual(r.status_code, 200)
         body = r.json()
         raw = r.text
@@ -582,7 +582,7 @@ class TestTripsDetailOwnership(unittest.TestCase):
         client, _ = self._client()
         with client:
             token = _login(client, "demo-mei")
-            r = client.get(f"/trips/{self._OWNER_IDK}?session_token={token}")
+            r = client.get(f"/trips/{self._OWNER_IDK}", headers={"X-Session-Token": token})
         self.assertEqual(r.status_code, 200, r.text)
         body = r.json()
         self.assertEqual(body.get("idempotency_key"), self._OWNER_IDK)
@@ -605,7 +605,7 @@ class TestTripsDetailOwnership(unittest.TestCase):
         client, _ = self._client()
         with client:
             other_token = _login(client, "demo-alex")   # real user, NOT the trip owner
-            r = client.get(f"/trips/{self._OWNER_IDK}?session_token={other_token}")
+            r = client.get(f"/trips/{self._OWNER_IDK}", headers={"X-Session-Token": other_token})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json(), {"error": "not_found", "idempotency_key": self._OWNER_IDK})
 
@@ -613,7 +613,7 @@ class TestTripsDetailOwnership(unittest.TestCase):
     def test_anon_trip_correct_owner_token_200(self):
         client, _ = self._client()
         with client:
-            r = client.get(f"/trips/{self._ANON_IDK}?owner_token={self._ANON_TOKEN}")
+            r = client.get(f"/trips/{self._ANON_IDK}", headers={"X-Owner-Token": self._ANON_TOKEN})
         self.assertEqual(r.status_code, 200, r.text)
         body = r.json()
         self.assertEqual(body.get("idempotency_key"), self._ANON_IDK)
@@ -622,7 +622,7 @@ class TestTripsDetailOwnership(unittest.TestCase):
     def test_anon_trip_wrong_owner_token_404(self):
         client, _ = self._client()
         with client:
-            r_wrong = client.get(f"/trips/{self._ANON_IDK}?owner_token=not-the-right-secret")
+            r_wrong = client.get(f"/trips/{self._ANON_IDK}", headers={"X-Owner-Token": "not-the-right-secret"})
             r_missing = client.get(f"/trips/{self._ANON_IDK}")
         self.assertEqual(r_wrong.status_code, 404)
         self.assertEqual(r_wrong.json(), {"error": "not_found", "idempotency_key": self._ANON_IDK})
@@ -700,7 +700,7 @@ class TestTripsListOwnership(unittest.TestCase):
         client = TestClient(server.build_app())
         with client:
             other_token = _login(client, "demo-alex")  # a real, but WRONG, user's session
-            r = client.get(f"/trips?user_id={_USER_ID}&session_token={other_token}")
+            r = client.get(f"/trips?user_id={_USER_ID}", headers={"X-Session-Token": other_token})
             self.assertNotEqual(r.status_code, 200)
             self.assertNotIn("BK-SECRET-002", r.text)
 
@@ -713,7 +713,7 @@ class TestTripsListOwnership(unittest.TestCase):
         client = TestClient(server.build_app())
         with client:
             token = _login(client, _USER_ID)
-            r = client.get(f"/trips?user_id={_USER_ID}&session_token={token}")
+            r = client.get(f"/trips?user_id={_USER_ID}", headers={"X-Session-Token": token})
             self.assertEqual(r.status_code, 200, r.text)
             keys = [t["idempotency_key"] for t in r.json().get("trips", [])]
             self.assertIn("trip-mine", keys)
