@@ -1,0 +1,4 @@
+{
+  "_comment": "Human-reviewed docs/ images (see scripts/scan_infra_leaks.py). Add an entry ONLY after a human has visually inspected the image and confirmed it contains no real IP addresses, account IDs, VPC/vSwitch/security-group IDs, session tokens, or other secrets. Key = repo-relative path, value = sha256 of the file's current bytes.",
+  "docs/architecture.png": "694350b75a20c6756d4d93fe8dbf014724b0ee7bf17bc9400acfa8f7460c96d4"
+}
