@@ -143,9 +143,7 @@ The Qwen model served through the runtime container pulls from DashScope via `DA
 ### Evidence
 
 - `DASHSCOPE_API_KEY` is read from the environment; see `society/utils/model_router.py` and `society/utils/intent_parser.py` for the read sites (env var name only, never a value).
-- Screenshot of the live ECS instance's console page (Instance ID `i-t4n44gbij7622v7ecow4`, Status: Running, Zone: Singapore D, matching VPC/vSwitch bindings used throughout this proof): [`docs/alicloud-deployment-proof.png`](https://github.com/yuanhawk/travel-guild-submission/blob/main/docs/alicloud-deployment-proof.png)
-
-  ![AliCloud ECS instance running](docs/alicloud-deployment-proof.png)
+- Screenshot of the live ECS instance's console page (Status: Running) previously lived at `docs/alicloud-deployment-proof.png` — removed (see SECURITY-ADVISORY.md): the unredacted capture exposed a real public IP, private IP, and VPC/vSwitch resource IDs, none of which add anything a judge needs beyond "the ECS instance exists and is running." A redacted replacement showing only the instance status/type will be added back.
 
 ---
 
@@ -278,4 +276,4 @@ Open each file at the referenced line to confirm the claim in under 2 minutes:
 7. **Alipay sim note** → `ucp-merchant/alipay_sim.go:30` (`alipaySimNote` constant)
 8. **W3C-VC tier-2 label** → `ucp-merchant/mandate_vc.go:39–40` (KIV note in comment)
 9. **RFC 9421 signing** → `ucp-merchant/rfc9421.go` (full verifier); `society/utils/ucp_signing.py` (Python client)
-10. **AliCloud ECS deployment screenshot** → `docs/alicloud-deployment-proof.png` — Instance Details console page, Status: Running
+10. **AliCloud ECS deployment screenshot** → removed pending a redacted replacement (see SECURITY-ADVISORY.md); Instance Details console page, Status: Running
