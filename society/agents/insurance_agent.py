@@ -789,12 +789,19 @@ DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 MODEL = os.environ.get("SOCIETY_LLM_MODEL", "qwen3-max")  # cheap model for test sweeps
 
+# PUBLIC-EXPORT NOTE: this is a simplified stand-in for the prompt actually used in
+# production. The real one is iteratively tuned against a private evaluation corpus
+# (clause-grounding disambiguation, wording for each CoverageStatus, edge-case
+# phrasing guidance, etc.) — that tuning is the product's work, not something this
+# showcase repo hands out verbatim. This version keeps the JSON contract the rest
+# of the pipeline depends on (the "rationale" key read in _llm_rationale above, and
+# validated by validate_rationale) so the code still runs end-to-end, but the
+# actual wording here is intentionally unrefined.
 _LLM_SYSTEM_PROMPT = (
-    "You are an insurance-coverage explainer. You will be given a peril, a coverage "
-    "STATUS, and the EXACT matched policy clause text. Write ONE plain-English "
-    "sentence explaining the coverage status to a traveler. You MUST NOT introduce "
-    "any fact, number, clause id, or peril not present in the provided clause text "
-    "and status. Do not soften an EXCLUDED status into 'covered'. Return JSON "
+    "You are an insurance-coverage assistant. You will be given a peril, a coverage "
+    "status, and matched policy clause text. Write one plain-English sentence "
+    "explaining the coverage status to a traveler, using only the facts given — do "
+    "not add anything not present in the clause text or status. Return JSON: "
     "{\"rationale\": \"...\"}."
 )
 

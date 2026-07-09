@@ -440,6 +440,14 @@ DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 MODEL = os.environ.get("SOCIETY_LLM_MODEL", "qwen3-max")  # cheap model for test sweeps
 
+# PUBLIC-EXPORT NOTE: this is a simplified stand-in for the prompt actually used in
+# production. The real one is iteratively tuned against a private evaluation corpus
+# (disambiguation heuristics for vague/partial coverage language, sub-limit vs.
+# conditional wording cues, etc.) — that tuning is the product's work, not something
+# this showcase repo hands out verbatim. This version keeps the JSON contract the
+# rest of the pipeline depends on (validate_user_policy below, which launders every
+# field regardless) so the code still runs end-to-end, but the actual wording here
+# is intentionally unrefined.
 _PARSE_SYSTEM_PROMPT = (
     "You convert a traveler's free-text description of THEIR OWN existing travel-"
     "insurance policy into a strict JSON object. Schema: {\"policy_label\": str, "
@@ -447,9 +455,8 @@ _PARSE_SYSTEM_PROMPT = (
     + ", ".join(sorted(p.value for p in Peril)) + ">, \"stance\": <one of: covered, "
     "excluded, sub_limited, conditional, unknown>, \"limit_cents\": int|null, "
     "\"condition_text\": str|null}], \"global_exclusions\": [<peril_class>...]}. "
-    "Use ONLY perils from the listed set. Do NOT invent coverage: if the text does "
-    "not clearly state a peril is covered, omit it (it will be treated as unverified). "
-    "Never name an insurer or plan. Return ONLY the JSON object."
+    "Use ONLY perils from the listed set. If unsure whether a peril is covered, use "
+    "\"unknown\". Never name an insurer or plan. Return ONLY the JSON object."
 )
 
 

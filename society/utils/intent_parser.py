@@ -1322,22 +1322,22 @@ _VIBE_SYNONYMS: dict[str, str] = {
 # those are determined deterministically from the text and OVERRIDE anything
 # the LLM might return. This eliminates per-leg night/date variance entirely.
 
+# PUBLIC-EXPORT NOTE: this is a simplified stand-in for the prompt actually used in
+# production. The real one is iteratively tuned against a private evaluation corpus
+# (disambiguation heuristics, multi-city edge cases, catalog-validation hints, etc.)
+# — that tuning is the product's work, not something this showcase repo hands out
+# verbatim. This version keeps the JSON contract the rest of the pipeline depends on
+# (_parse_llm_response below, and everything downstream of it) so the code still runs
+# end-to-end, but the actual wording here is intentionally unrefined.
 _LLM_SYSTEM_PROMPT = """You are a travel intent parser. Parse the user's travel request into PURE JSON only.
 
-Output ONLY valid JSON with NO markdown, NO explanation, NO code blocks — just the raw JSON object.
-
-IMPORTANT: Output ONLY the qualitative trip structure — which city/cities and vibe(s), in order.
-Do NOT output budget, nights, dates, or adults — those are determined separately.
-
-This is a MULTI-CITY parser. If the user names several cities (e.g.
-"Bangkok then Kuala Lumpur then Singapore" or "Perth, Margaret River, Albany"),
-output ONE leg per city, in the ORDER the user states them.
+Output ONLY valid JSON — no markdown, no explanation.
 
 Required JSON schema:
 {
   "legs": [
     {
-      "city": <string, the destination city EXACTLY as the user names it, lowercased>,
+      "city": <string, the destination city as the user names it, lowercased>,
       "vibe": <string, one of the allowed vibes below — omit if unclear>
     }
   ]
@@ -1345,25 +1345,10 @@ Required JSON schema:
 
 Allowed vibes: culture, beach, surf, relax, city, adventure, luxury
 
-Rules:
-- city: extract the destination city name the user actually wrote, lowercased
-  (e.g. "Paris" → "paris", "Siem Reap" → "siem reap"). NEVER invent or substitute
-  a city the user did not name. Do NOT translate, expand, or "correct" the name.
-  The downstream system validates each city against its booking catalog — your job
-  is faithful extraction, NOT validation. When unsure of the exact name, copy the
-  user's spelling verbatim (lowercased).
-- vibe MUST be one of the allowed vibes — or omit the vibe field
-- Do NOT include budget, nights, dates, or adults in your output — omit those fields entirely
-- MULTI-CITY: one leg per city, in stated order (e.g. "Bangkok, KL, Singapore" → 3 legs)
-- If a single-city trip has multiple vibes ("relax then beach"), split into multiple legs
-  with the SAME city, preserving the stated vibe order
-- Leg count must be 1 to 5
-- If you cannot identify ANY destination city, output:
-  {"needs_clarification": true, "reason": "..."}.
-
-Note: the deterministic layer re-derives city topology from the request text and
-overrides your output when the text is unambiguous, so faithful extraction (not
-guessing) is always the safe choice.
+If the user names multiple cities, output one leg per city in the order stated.
+Do NOT include budget, nights, dates, or adults — those are handled separately.
+If you cannot identify any destination city, output:
+{"needs_clarification": true, "reason": "..."}.
 """
 
 # ---------------------------------------------------------------------------
