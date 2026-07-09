@@ -143,7 +143,8 @@ The Qwen model served through the runtime container pulls from DashScope via `DA
 ### Evidence
 
 - `DASHSCOPE_API_KEY` is read from the environment; see `society/utils/model_router.py` and `society/utils/intent_parser.py` for the read sites (env var name only, never a value).
-- Screenshot of the live ECS instance's console page (Status: Running) previously lived at `docs/alicloud-deployment-proof.png` — removed (see SECURITY-ADVISORY.md): the unredacted capture exposed a real public IP, private IP, and VPC/vSwitch resource IDs, none of which add anything a judge needs beyond "the ECS instance exists and is running." A redacted replacement showing only the instance status/type will be added back.
+- **Live deployment, verifiable directly:** `curl https://api-staging.itinerario.io/health` returns `{"status":"ok","society":"ready","git_sha":"<commit>"}` from `society/orchestration/server.py`'s `/health` handler — a judge can hit this URL right now and see a real, currently-running backend respond, not a static claim.
+- A cloud-console screenshot was considered as evidence but is deliberately not shipped, even redacted: any capture of live infrastructure carries residual risk not worth taking in a public repo. See SECURITY-ADVISORY.md #10 for the full incident writeup — an earlier version leaked real infra identifiers, was redacted, and was then removed entirely; its git history was rewritten so no version of it (redacted or not) remains reachable from this repo.
 
 ---
 
@@ -276,4 +277,4 @@ Open each file at the referenced line to confirm the claim in under 2 minutes:
 7. **Alipay sim note** → `ucp-merchant/alipay_sim.go:30` (`alipaySimNote` constant)
 8. **W3C-VC tier-2 label** → `ucp-merchant/mandate_vc.go:39–40` (KIV note in comment)
 9. **RFC 9421 signing** → `ucp-merchant/rfc9421.go` (full verifier); `society/utils/ucp_signing.py` (Python client)
-10. **AliCloud ECS deployment screenshot** → removed pending a redacted replacement (see SECURITY-ADVISORY.md); Instance Details console page, Status: Running
+10. **Live AliCloud ECS deployment** → `curl https://api-staging.itinerario.io/health` — a real, currently-running backend responds with its `git_sha` (not a static claim); see SECURITY-ADVISORY.md #10 for why no console screenshot ships in this repo

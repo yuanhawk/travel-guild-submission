@@ -116,10 +116,11 @@ This was caught by a follow-up review after the original 9 findings above were m
 
 **Fix:** The unredacted screenshot has been removed from the repo (`docs/alicloud-deployment-proof.png` deleted) and the instance-ID/zone-specific text in `ALICLOUD-PROOF.md` has been redacted to a generic "Status: Running" claim.
 
-**Not yet done — needs a decision from the repo owner:**
-- The image and instance ID were live on the public `main` branch between commits `186b82a` and this fix, so they are already indexed/cached by anything that crawled the repo in that window (GitHub API, forks, search engine caches, security scanners). **Removing the file from the current tree does not remove it from git history** — it remains fetchable from the old commit/blob unless the history is rewritten (`git filter-repo` + a force-push), which is a separate, more disruptive action not taken here without explicit sign-off.
-- **Recommended immediate action: review the ECS instance's security groups / firewall rules now**, since its public IP has been publicly known for as long as the screenshot was live. Consider whether the instance should be replaced (new IP) if the exposure window is a concern.
-- A redacted replacement screenshot (showing only instance status/type, cropping out IP/VPC/vSwitch fields) can be added back if the "ECS proof" claim needs a visual artifact again.
+**Status update (repo owner, same day) — corrects the paragraph above:**
+- Confirmed: the original unredacted screenshot was live on public `main` for a real window (from the commit that first added it until a same-day redaction pass), so it may already be indexed/cached by anything that crawled the repo in that window (GitHub API, forks, search engine caches, security scanners). That exposure window is real and can't be undone.
+- **History has since been rewritten** (`git filter-branch`, equivalent in effect to `git filter-repo`, plus a force-push) so no version of the image — redacted or unredacted — remains reachable from any commit on `main` as of this writing. Verified directly: `git rev-list --objects --all -- docs/alicloud-deployment-proof.png` returns zero blobs on current `main`. This repo has never gone public, so the rewrite carried no collaborator-disruption cost. The framing above ("not done here", "a separate, more disruptive action") describes the state before this rewrite, not the current one.
+- **Decision: no console screenshot ships at all, redacted or otherwise.** A residual-risk visual artifact of live infrastructure isn't worth it even redacted. `ALICLOUD-PROOF.md` §4 now cites a live, judge-curlable `/health` endpoint instead.
+- **Still outstanding, requires action outside this repo:** review the ECS instance's security groups/firewall rules and consider rotating its public IP, since that IP was genuinely publicly known for the exposure window above, independent of anything fixed in this repo or its history.
 
 ---
 
