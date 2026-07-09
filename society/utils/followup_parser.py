@@ -127,9 +127,8 @@ def _clamp_question_domain(raw: Any) -> str | None:
 
 # Patterns that are pure informational queries — answer from context without re-planning.
 _INFO_QUERY_RE = re.compile(
-    r"^\s*(?:what(?:'s|'s| is| are)?|how much|can you (?:tell|show) me|show me|give me)\s+"
-    r"(?:the\s+)?(?:budget|cost|price|total|breakdown|estimate|summary|itinerary|plan|dates?|"
-    r"nights?|days?|hotels?|lodging|insurance|visa|health|schedule)\b",
+    r"^\s*(?:what'?s?|what is|how much|show me|give me)\s+(?:the\s+)?"
+    r"(?:budget|cost|price|total|itinerary|plan|nights?|days?)\b",
     re.I,
 )
 
@@ -258,35 +257,6 @@ def _nights_from_dates(checkin: str | None, checkout: str | None) -> int:
         return max(0, (co - ci).days)
     except Exception:
         return 0
-
-
-def _fmt_month_day(d: date) -> str:
-    """'Jul 12' — %b + bare day number (avoids the non-portable %-d strftime flag)."""
-    return f"{d.strftime('%b')} {d.day}"
-
-
-def _format_added_leg_dates(checkin: str | None, checkout: str | None) -> str | None:
-    """Human-readable date range for a newly-added leg, e.g. 'Jul 12' or 'Jul 13-14'.
-
-    Returns None (never a fabricated/garbage string) when checkin/checkout are
-    missing or unparseable — caller falls back to the bare city name.
-    """
-    try:
-        ci = date.fromisoformat(checkin or "")
-        co = date.fromisoformat(checkout or "")
-    except Exception:
-        return None
-    if co <= ci:
-        # 0-night / same-day leg — a single date, not a range.
-        return _fmt_month_day(ci)
-    # checkout is the morning-after departure date; display the last NIGHT
-    # (checkout - 1 day), not the checkout date itself.
-    display_end = co - timedelta(days=1)
-    if display_end == ci:
-        return _fmt_month_day(ci)
-    if display_end.month == ci.month:
-        return f"{_fmt_month_day(ci)}-{display_end.day}"
-    return f"{_fmt_month_day(ci)}-{_fmt_month_day(display_end)}"
 
 
 def _total_nights_req(trip_request: dict) -> int:
@@ -461,32 +431,6 @@ def apply_delta(
     req = _copy.deepcopy(trip_request)
     changed: list[str] = []
     legs: list[dict] = req.get("legs") or []
-
-    # #fix (startdate-drop, task #114): pre-scan for an explicit, valid
-    # set_start_date anywhere in this delta's ops — BEFORE the main pass
-    # below mutates `legs`. remove_leg/add_leg/set_nights/adjust_nights each
-    # re-derive their `_redistribute_dates` anchor from whatever `legs[0]`'s
-    # checkin happens to be AT THE TIME they run. That's fine when nothing
-    # else touches dates, but if set_start_date runs earlier in the SAME
-    # delta and a later leg-restructuring op then removes the leg that
-    # carried that anchor (or splices in a new dateless leg), the surviving
-    # legs' checkins already reflect the old anchor plus whatever nights the
-    # removed leg consumed — later ops re-anchor off that DRIFTED date, not
-    # the user's actual explicit request, and the real start date is lost
-    # with no error. Op order in a delta is not guaranteed to match the
-    # sentence's logical precedence (the LLM parser may emit set_start_date
-    # before OR after remove_leg/add_leg for the same one-turn request), so
-    # the only ordering-independent fix is to remember the LAST valid
-    # explicit date here and do one corrective final re-anchor after ALL
-    # other ops have finished restructuring `legs` (see bottom of loop).
-    explicit_start_date: str | None = None
-    for _raw_op in (delta.get("ops") or []):
-        _norm = _normalize_op(_raw_op)
-        if isinstance(_norm, dict) and _norm.get("op") == "set_start_date":
-            try:
-                explicit_start_date = date.fromisoformat(_norm.get("date") or "").isoformat()
-            except Exception:
-                pass  # invalid date — surfaced via the normal in-loop "invalid — skipped" path
 
     for op in (delta.get("ops") or []):
         raw_op = op
@@ -734,20 +678,6 @@ def apply_delta(
             # take effect, and this one is now honestly flagged as skipped.
             changed.append(f"{UNSUPPORTED_OP_PREFIX}{kind!r} (not recognised — skipped)")
             logger.debug("followup_parser: unknown op=%s — skipped", kind)
-
-    # #fix (startdate-drop, task #114): corrective final re-anchor. If this
-    # delta contained a valid explicit start_date anywhere, guarantee the
-    # FINAL leg list reflects it — regardless of what order remove_leg/
-    # add_leg/set_nights/adjust_nights ran in, and regardless of whether one
-    # of them re-anchored off a drifted checkin above. This is idempotent
-    # when set_start_date was already the last date-affecting op (produces
-    # the identical result the in-loop call already computed), and it fixes
-    # the case where a leg-restructuring op ran AFTER set_start_date and
-    # silently dropped the user's requested date.
-    if explicit_start_date is not None and legs:
-        _redistribute_dates(legs, start_date=explicit_start_date)
-        req["assumed_start_date"] = None
-        req["assumed_date_year"] = None
 
     # Keep legs in sync on req.
     req["legs"] = legs
@@ -1093,19 +1023,7 @@ def build_assistant_reply(
     added = [c for c in new_cities if c not in old_cities]
     removed = [c for c in old_cities if c not in new_cities]
     if added:
-        # #199: disclose WHICH dates each newly-added city landed on — the leg's
-        # checkin/checkout already exist on new_envelope["legs"]; surface them per
-        # city instead of leaving the user to dig through the itinerary UI.
-        legs_by_city = {
-            l.get("city", "?"): l for l in (new_envelope.get("legs") or []) if isinstance(l, dict)
-        }
-        added_display = []
-        for city in added:
-            leg = legs_by_city.get(city) or {}
-            checkin, checkout = leg.get("checkin"), leg.get("checkout")
-            date_range = _format_added_leg_dates(checkin, checkout) if checkin and checkout else None
-            added_display.append(f"{city} ({date_range})" if date_range else city)
-        parts.append(f"Added: {', '.join(added_display)}.")
+        parts.append(f"Added: {', '.join(added)}.")
     if removed:
         parts.append(f"Removed: {', '.join(removed)}.")
 
