@@ -18,6 +18,10 @@ ucp_signing_*.json
 # etc, no real secrets) -- get_telegram_link_token.json was silently dropped by *token*
 # above, breaking the 17-fixture regression lock in CI.
 !society/tests/fixtures/golden_requests/*.json
+# SECURITY AUDIT FOLLOW-UP: the web/ mirror of the same fixtures never got the matching
+# exception above, so its get_telegram_link_token.json was silently dropped too — the
+# web-side 17-fixture count was quietly wrong (16) until this was noticed.
+!web/src/lib/__fixtures__/golden_requests/*.json
 !*.example
 
 # ── Python ───────────────────────────────────────────────────────────────

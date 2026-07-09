@@ -28,22 +28,24 @@ describe('getTrip — GET /trips/{key}', () => {
     vi.stubGlobal('fetch', f);
     await getTrip('trip-abc-123');
     const [url, init] = (f as unknown as MockedFetch).mock.calls[0];
-    // URL must include /trips/ + the key. IDOR fix (#155): ownership proof is now
-    // threaded as query params, so the path is followed by `?...` not end-of-string.
-    expect(url).toMatch(/\/trips\/trip-abc-123(\?|$)/);
+    // URL must include /trips/ + the key. SECURITY (secrets-in-URL fix): ownership
+    // proof now rides as request headers, not query params, so the path is bare.
+    expect(url).toMatch(/\/trips\/trip-abc-123$/);
     // GET: no method specified (defaults to GET) OR explicitly GET; no body
     expect(!init || init.method === undefined || init.method === 'GET').toBe(true);
     expect(!init || init.body === undefined).toBe(true);
   });
 
-  it('sends owner_token (and session_token when logged in) as query params (#155)', async () => {
+  it('sends owner_token (and session_token when logged in) as X-Owner-Token/X-Session-Token headers (#155, secrets-in-URL fix)', async () => {
     const f = mockGet(200, { outcome: 'plan_ready', idempotency_key: 'trip-auth-1' });
     vi.stubGlobal('fetch', f);
     // Anonymous (no session): owner_token always present, session_token absent.
     await getTrip('trip-auth-1');
-    const [anonUrl] = (f as unknown as MockedFetch).mock.calls[0];
-    expect(anonUrl).toMatch(/[?&]owner_token=[^&]+/);
-    expect(anonUrl).not.toMatch(/[?&]session_token=/);
+    const [anonUrl, anonInit] = (f as unknown as MockedFetch).mock.calls[0];
+    expect(anonUrl).not.toMatch(/[?&]owner_token=/);
+    const anonHeaders = new Headers(anonInit?.headers);
+    expect(anonHeaders.get('x-owner-token')).toBeTruthy();
+    expect(anonHeaders.has('x-session-token')).toBe(false);
 
     // Logged-in: session_token is threaded too — mirrors how authFields() is
     // threaded into every POST body (/confirm, /cancel, /refine, /replan).
@@ -54,9 +56,12 @@ describe('getTrip — GET /trips/{key}', () => {
     const { getTrip: getTripWithSession } = await import('./api');
     vi.stubGlobal('fetch', f);
     await getTripWithSession('trip-auth-2');
-    const [loggedInUrl] = (f as unknown as MockedFetch).mock.calls[1];
-    expect(loggedInUrl).toContain('session_token=sess-tok-xyz');
-    expect(loggedInUrl).toContain('owner_token=owner-tok-abc');
+    const [loggedInUrl, loggedInInit] = (f as unknown as MockedFetch).mock.calls[1];
+    expect(loggedInUrl).not.toContain('session_token=');
+    expect(loggedInUrl).not.toContain('owner_token=');
+    const loggedInHeaders = new Headers(loggedInInit?.headers);
+    expect(loggedInHeaders.get('x-session-token')).toBe('sess-tok-xyz');
+    expect(loggedInHeaders.get('x-owner-token')).toBe('owner-tok-abc');
     vi.doUnmock('./session');
     vi.resetModules();
   });

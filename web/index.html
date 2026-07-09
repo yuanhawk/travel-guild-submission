@@ -3,6 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- SECURITY: compensating control for session.ts's localStorage tradeoff (session_token/
+         owner_token are readable by any script that executes in this page). A meta-tag CSP is
+         used rather than an HTTP header because this bundle ships to AliCloud OSS + CDN static
+         hosting (see vite.config.ts) — a `_headers` file (Cloudflare/Netlify) or a Caddy config
+         doesn't apply here. script-src 'self' is the actual mitigation: it blocks inline/
+         injected <script> execution, which is the only way an XSS payload could read
+         localStorage and exfiltrate a token in the first place. connect-src is left open
+         (VITE_API_BASE is runtime-configurable and may be a different origin than this
+         static bundle) rather than guessing a value that could silently break API calls. -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self';
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' data: https:;
+      connect-src *;
+      object-src 'none';
+      base-uri 'self';
+      frame-ancestors 'self';
+    " />
     <title>Travel Guild</title>
   </head>
   <body>

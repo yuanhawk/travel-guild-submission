@@ -5824,10 +5824,16 @@ def _llm_call(free_text: str) -> str:
         content = data["choices"][0]["message"]["content"]
         return content if isinstance(content, str) else json.dumps(content)
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(
-            f"DashScope API error HTTP {e.response.status_code}: "
-            f"{e.response.text[:300]}"
+        # SECURITY: the raw upstream response body is logged (server-side only),
+        # never embedded in the exception message — a future caller that surfaces
+        # this message to a client (e.g. a bare `except Exception: ... str(exc)`
+        # handler, a pattern already used elsewhere in this codebase) must not be
+        # able to leak upstream diagnostic text (account/request details) verbatim.
+        logger.warning(
+            "DashScope API error HTTP %s: %s",
+            e.response.status_code, e.response.text[:300],
         )
+        raise RuntimeError(f"DashScope API error HTTP {e.response.status_code}")
     except httpx.RequestError as e:
         # Transport-level failure (timeout / connection / DNS). Degrade, don't die.
         raise RuntimeError(f"DashScope transport error: {type(e).__name__}: {e}")

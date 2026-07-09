@@ -610,19 +610,17 @@ export function confirmPlan(idempotency_key: string, user_id?: string): Promise<
 }
 
 /** GET /trips/{key} — the sanitized stored plan envelope, for restoring the itinerary
- *  after a page reload. Returns null on 404 (trip gone → caller clears the stale key). */
-/** GET /trips/{key} — the sanitized stored plan envelope, for restoring the itinerary
- *  after a page reload. IDOR fix (#155): thread this session's ownership proof as QUERY
- *  PARAMS (session_token for logged-in trips, owner_token for anonymous) so the server's
- *  two-tier gate can authorize the read — same authFields() sent on POST /confirm etc.,
- *  just in the query string because this is a GET. A non-owner (or expired token) gets a
- *  404, which we map to null exactly like a genuinely-gone trip → caller clears the stale
- *  key. Returns null on any non-2xx. */
+ *  after a page reload. IDOR fix (#155): thread this session's ownership proof as
+ *  REQUEST HEADERS (X-Session-Token for logged-in trips, X-Owner-Token for anonymous)
+ *  so the server's two-tier gate can authorize the read — same authFields() sent on
+ *  POST /confirm etc., now via headers rather than the query string (secrets-in-URL
+ *  fix — see _authHeaders' docstring) so this session's bearer tokens never land in
+ *  an access log, browser history, or Referer header. A non-owner (or expired token)
+ *  gets a 404, which we map to null exactly like a genuinely-gone trip → caller
+ *  clears the stale key. Returns null on any non-2xx. */
 export async function getTrip(idempotency_key: string): Promise<NegotiateResult | null> {
   const { session_token, owner_token } = authFields();
-  const qs = new URLSearchParams({ owner_token });
-  if (session_token) qs.set('session_token', session_token);
-  const r = await fetch(`${API_BASE}/trips/${encodeURIComponent(idempotency_key)}?${qs.toString()}`);
+  const r = await fetchAuthed(`/trips/${encodeURIComponent(idempotency_key)}`, session_token, owner_token);
   if (!r.ok) return null;
   return (await r.json()) as NegotiateResult;
 }
@@ -678,6 +676,33 @@ async function getJson<T>(path: string): Promise<T> {
   if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
   return (await r.json()) as T;
 }
+
+// SECURITY: session_token/owner_token are bearer-equivalent ownership secrets
+// (8h TTL) — they must never ride in a URL query string, where they'd land in
+// server/proxy access logs, browser history, and any Referer header sent to a
+// cross-origin resource loaded by the page. Sent as request headers instead;
+// server.py reads the same headers (case-insensitive; lowercased here because
+// the browser's Headers object normalizes to lowercase anyway).
+function _authHeaders(session_token?: string | null, owner_token?: string | null): HeadersInit {
+  const headers: Record<string, string> = {};
+  if (session_token) headers['x-session-token'] = session_token;
+  if (owner_token) headers['x-owner-token'] = owner_token;
+  return headers;
+}
+
+async function fetchAuthed(
+  path: string, session_token?: string | null, owner_token?: string | null,
+): Promise<Response> {
+  return fetch(`${API_BASE}${path}`, { headers: _authHeaders(session_token, owner_token) });
+}
+
+async function getJsonAuthed<T>(
+  path: string, session_token?: string | null, owner_token?: string | null,
+): Promise<T> {
+  const r = await fetchAuthed(path, session_token, owner_token);
+  if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+  return (await r.json()) as T;
+}
 async function sendJson<T>(method: string, path: string, body: unknown): Promise<T> {
   const r = await fetch(`${API_BASE}${path}`, {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -699,13 +724,11 @@ export function selectDemoUser(user_id: string): Promise<{ user: DemoUser }> {
  *  through so the backend can be gated in a follow-up without another FE
  *  change. Unlike getTelegramLinkToken (whose session_token is REQUIRED
  *  server-side, so it's always sent, even empty), this one is only appended
- *  when present — omitting it keeps the URL byte-identical to the pre-fix
- *  shape (?user_id= only), preserving backward compat with the still-unguarded
- *  backend and the golden-request-contract fixture until Phase 2 lands. */
+ *  when present. SECURITY (secrets-in-URL fix): sent as the X-Session-Token
+ *  request header, not a query param — bearer-equivalent secrets must never
+ *  land in an access log, browser history, or a Referer header. */
 export function getPreferences(user_id: string, session_token?: string): Promise<Preferences> {
-  const qs = new URLSearchParams({ user_id });
-  if (session_token) qs.set('session_token', session_token);
-  return getJson<Preferences>(`/preferences?${qs.toString()}`);
+  return getJsonAuthed<Preferences>(`/preferences?${new URLSearchParams({ user_id })}`, session_token);
 }
 
 // ─── session login (SECURITY: closes the user_id-trust gap) ───────────────
@@ -741,10 +764,10 @@ export interface TelegramLinkResponse {
   reason?: string;
 }
 /** session_token is REQUIRED server-side (401 without a valid one matching
- *  user_id) — see loginSession(). */
+ *  user_id) — see loginSession(). SECURITY (secrets-in-URL fix): sent as the
+ *  X-Session-Token request header, not a query param. */
 export function getTelegramLinkToken(user_id: string, session_token?: string): Promise<TelegramLinkResponse> {
-  const qs = new URLSearchParams({ user_id, session_token: session_token ?? '' });
-  return getJson<TelegramLinkResponse>(`/telegram/link?${qs.toString()}`);
+  return getJsonAuthed<TelegramLinkResponse>(`/telegram/link?${new URLSearchParams({ user_id })}`, session_token);
 }
 
 /** The per-leg risk signals live in `risk_signals.per_leg`. */

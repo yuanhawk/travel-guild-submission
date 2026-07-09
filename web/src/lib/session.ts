@@ -13,12 +13,19 @@
 // SIMULATED-wallet demo trip, no real money or PII). Exposure is still
 // BOUNDED, not indefinite: entries carry a savedAt timestamp and are swept on
 // load past SESSION_TTL_MS (8h, mirrors society/utils/session_token.py's
-// server-side TTL so client/server lifetimes stay aligned). A CSP header is
-// the actual compensating control for the XSS risk this trades away (see the
-// backend Caddy config + this repo's Pages _headers file). NO real auth/
-// secrets are stored here — the demo user_id is replayed on every plan/
-// confirm so the backend auto-applies that profile's prefs; guest = no
-// user_id → system defaults (byte-identical to anonymous).
+// server-side TTL so client/server lifetimes stay aligned). SECURITY FIX: the
+// compensating control is a real Content-Security-Policy meta tag in
+// index.html (script-src 'self' blocks the inline/injected <script>
+// execution an XSS payload would need to read localStorage) — a prior
+// version of this comment pointed at a backend Caddy config + Pages
+// `_headers` file that never existed in this repo (this app ships to AliCloud
+// OSS + CDN static hosting, not Cloudflare/Netlify Pages or a Caddy-fronted
+// origin — see vite.config.ts). Also: session_token/owner_token are now sent
+// as request headers, never URL query params, so they can no longer land in
+// server/proxy access logs, browser history, or a Referer header regardless
+// of the CSP. NO real auth/secrets are stored here — the demo user_id is
+// replayed on every plan/confirm so the backend auto-applies that profile's
+// prefs; guest = no user_id → system defaults (byte-identical to anonymous).
 import type { DemoUser } from './api';
 
 const KEY = 'tg_session';

@@ -88,10 +88,10 @@ def _dispatch(client: TestClient, fx: dict):
     if kind == "body":
         return client.request(method, fx["path"], json=fx["body"])
     if kind == "query":
-        return client.get(fx["path"], params=fx.get("query", {}))
+        return client.get(fx["path"], params=fx.get("query", {}), headers=fx.get("headers", {}))
     if kind == "path_query":
         path = fx["path_template"].format(**fx["path_params"])
-        return client.get(path, params=fx.get("query", {}))
+        return client.get(path, params=fx.get("query", {}), headers=fx.get("headers", {}))
     if kind == "url_only":  # place_photo -- real GET with the ref
         return client.get(fx["path"], params=fx.get("query", {}))
     raise AssertionError(f"unknown fixture kind {kind!r}")

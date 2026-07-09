@@ -102,6 +102,7 @@ from typing import Any
 
 import httpx
 import uvicorn
+from utils.ssrf_guard import validate_outbound_url
 
 from agents.a2a_agent import (
     A2AAgent,
@@ -119,6 +120,17 @@ MERCHANT_MCP_URL = os.environ.get(
     "MERCHANT_MCP_URL",
     "http://ucp-merchant:8090/api/ucp/mcp",
 )
+
+# SSRF-001: validate at import time (same guard budget_agent.py and
+# accommodation_agent.py apply to the identical env var — a security audit
+# found this check previously existed ONLY in budget_agent.py, giving zero
+# protection to this agent's separate process/container).
+try:
+    validate_outbound_url(MERCHANT_MCP_URL, param_name="MERCHANT_MCP_URL")
+except ValueError:
+    raise
+except Exception as _exc:  # noqa: BLE001
+    logger.warning("MERCHANT_MCP_URL validation skipped: %s", _exc)
 
 _MERCHANT_TIMEOUT = float(os.environ.get("MERCHANT_TIMEOUT", "15"))
 
@@ -234,6 +246,10 @@ def _lookup_catalog(
         total_cents, nights, hotel (with review_score), available, source
     Raises RuntimeError on merchant error or not-found.
     """
+    # SSRF-001 TOCTOU fix: re-validate immediately before every outbound call,
+    # not just once at import time — a hostname that resolved benignly at
+    # import time could be DNS-rebound to a metadata address by now.
+    validate_outbound_url(MERCHANT_MCP_URL, param_name="MERCHANT_MCP_URL")
     payload = {
         "jsonrpc": "2.0",
         "id": str(uuid.uuid4()),
