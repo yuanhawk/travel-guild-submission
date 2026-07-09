@@ -72,6 +72,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST_PATH = Path(__file__).resolve().parent / "docs_image_allowlist.json"
 
+# This script's own source and test file are exempt from the scan: both
+# deliberately contain realistic-looking example IPs/resource ids (including
+# the actual leaked instance id, for documentation/regression purposes — see
+# the module docstring and test_scan_infra_leaks.py's docstrings) as
+# CRAFTED TEST FIXTURES, not real leaks. Mirrors .gitleaks.toml's existing
+# path-allowlist convention for the same reason (ucp-merchant/AUTH-SPEC.md,
+# society/tests/test_ucp_signing.py).
+_SELF_EXCLUDED_PATHS = {"scripts/scan_infra_leaks.py", "scripts/test_scan_infra_leaks.py"}
+
 # Only these extensions are treated as text and scanned for IPs/resource ids.
 # Deliberately excludes binary formats (images, fonts, etc.) — those go
 # through the docs-image-allowlist gate instead, not a text/regex scan.
@@ -292,6 +301,8 @@ def scan(paths: list[Path], root: Path = REPO_ROOT) -> list[str]:
             rel_path = abspath
             rel_posix = abspath.as_posix()
             inside_root = False
+        if inside_root and rel_posix in _SELF_EXCLUDED_PATHS:
+            continue
         suffix = abspath.suffix.lower()
         if inside_root and _is_docs_image_path(rel_posix, suffix):
             reason = check_docs_image(rel_posix, abspath, allowlist)
