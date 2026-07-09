@@ -108,19 +108,17 @@ Found by an audit of `society/orchestration/server.py` and its dependents; all 9
 
 ## 2. Fixed — infrastructure exposure in repo docs
 
-### 10. Real AliCloud ECS instance details exposed in a public-repo screenshot — High
+### 10. Real AliCloud ECS instance details baked into a repo screenshot — Low (repo has always been private)
 
-**What:** Commit `186b82a` ("docs: add required AliCloud deployment screenshot, fix stale KMS proof section") added `docs/alicloud-deployment-proof.png` — an unredacted AliCloud console screenshot — and referenced its Instance ID (`i-t4n44gbij7622v7ecow4`) directly in `ALICLOUD-PROOF.md`'s text. The screenshot *itself* went further than the text disclosed: it showed a **live public IP address**, a private IP address, VPC and vSwitch resource IDs, instance type, and image ID. A public IP is directly actionable reconnaissance — an attacker can target it for scanning/probing right now — which is materially worse than an instance ID alone.
+**What:** Commit `186b82a` ("docs: add required AliCloud deployment screenshot, fix stale KMS proof section") added `docs/alicloud-deployment-proof.png` — an unredacted AliCloud console screenshot — and referenced its Instance ID (`i-t4n44gbij7622v7ecow4`) directly in `ALICLOUD-PROOF.md`'s text. The screenshot itself went further than the text disclosed: it showed a live public IP address, a private IP address, VPC and vSwitch resource IDs, instance type, and image ID.
 
 This was caught by a follow-up review after the original 9 findings above were merged; it was not part of the original audit's scope.
 
-**Fix:** The unredacted screenshot has been removed from the repo (`docs/alicloud-deployment-proof.png` deleted) and the instance-ID/zone-specific text in `ALICLOUD-PROOF.md` has been redacted to a generic "Status: Running" claim.
+**Scope correction (repo owner):** `travel-guild-submission` has been a **private** GitHub repo continuously since its creation (2026-07-07) and was never flipped to public at any point the image was live — confirmed directly via `gh api repos/.../travel-guild-submission --jq '{private,visibility,created_at}'`. That means the image was never externally crawlable, indexable, or forkable — it was visible only to people who already had legitimate collaborator access to this private repo, who by definition already have (or can get) legitimate access to the AliCloud console itself. An earlier draft of this section treated this as a public-exposure incident ("may already be indexed/cached by search engines/crawlers", "recommend reviewing security groups / rotating the IP") — that framing was incorrect. No unauthorized party was ever exposed to this data.
 
-**Status update (repo owner, same day) — corrects the paragraph above:**
-- Confirmed: the original unredacted screenshot was live on public `main` for a real window (from the commit that first added it until a same-day redaction pass), so it may already be indexed/cached by anything that crawled the repo in that window (GitHub API, forks, search engine caches, security scanners). That exposure window is real and can't be undone.
-- **History has since been rewritten** (`git filter-branch`, equivalent in effect to `git filter-repo`, plus a force-push) so no version of the image — redacted or unredacted — remains reachable from any commit on `main` as of this writing. Verified directly: `git rev-list --objects --all -- docs/alicloud-deployment-proof.png` returns zero blobs on current `main`. This repo has never gone public, so the rewrite carried no collaborator-disruption cost. The framing above ("not done here", "a separate, more disruptive action") describes the state before this rewrite, not the current one.
-- **Decision: no console screenshot ships at all, redacted or otherwise.** A residual-risk visual artifact of live infrastructure isn't worth it even redacted. `ALICLOUD-PROOF.md` §4 now cites a live, judge-curlable `/health` endpoint instead.
-- **Still outstanding, requires action outside this repo:** review the ECS instance's security groups/firewall rules and consider rotating its public IP, since that IP was genuinely publicly known for the exposure window above, independent of anything fixed in this repo or its history.
+**Fix (defense-in-depth, not incident response):** the image was redacted, then removed from the repo entirely, and git history was rewritten (`git filter-branch` + force-push) so no version of it — redacted or unredacted — remains reachable from any commit on `main`. Verified directly: `git rev-list --objects --all -- docs/alicloud-deployment-proof.png` returns zero blobs on current `main`. `ALICLOUD-PROOF.md` §4 now cites a live, judge-curlable `/health` endpoint instead of any screenshot — good hygiene for whenever the repo does eventually go public, not a response to an actual leak.
+
+**No AliCloud-console action needed** (security-group review, IP rotation) — there was no exposure window to respond to.
 
 ---
 
