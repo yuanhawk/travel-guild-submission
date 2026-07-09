@@ -489,8 +489,9 @@ _ENTRY_RULES: list[dict[str, Any]] = [
     # ica.gov.sg: Indian passport holders explicitly REQUIRE a visa to enter
     # Singapore (India is only covered by Singapore's narrower Visa-Free Transit
     # Facility, not general tourist entry). India now correctly falls through to
-    # the "no seeded rule" conservative path for SG (no SG VISA_REQUIRED wildcard
-    # exists yet in this seed; out of E3's scope to add one).
+    # the SG VISA_REQUIRED wildcard below (finding #53 rerun: previously there was
+    # no wildcard, so India degraded to the soft "no seeded rule" conservative flag
+    # instead of the correct hard block with a real lead-time gate — fixed).
     {
         "dest_country": "SG", "program": "Visa-free entry",
         "kind": EntryKind.VISA_FREE,
@@ -503,6 +504,15 @@ _ENTRY_RULES: list[dict[str, Any]] = [
         "processing_lead_business_days": 0,
         "fee_cents": 0, "currency": "USD",
         "provenance": "seed:ica.gov.sg-visafree-2026 (IN corrected out 2026-07-04, E3, WebFetch-verified)",
+        "source_url": "https://www.ica.gov.sg/",
+    },
+    {
+        "dest_country": "SG", "program": "Singapore Visa (consular)",
+        "kind": EntryKind.VISA_REQUIRED,
+        "eligible_nationalities": None,
+        "processing_lead_business_days": 5,
+        "fee_cents": 3000, "currency": "SGD",  # SGD 30 standard visa application fee
+        "provenance": "seed:ica.gov.sg-visa-required-2026 (finding #53 rerun: added missing wildcard so non-visa-free nationalities, e.g. IN, get a real hard block instead of a soft unverified flag)",
         "source_url": "https://www.ica.gov.sg/",
     },
     # ---- Japan: visa exemption for 90+ countries ----
@@ -955,10 +965,23 @@ _ENTRY_RULES: list[dict[str, Any]] = [
         "source_url": "https://e-visa.uz/",
     },
     # ---- IR ----
+    # finding #53 rerun (HIGH): eligible_nationalities is an ALLOW-list everywhere
+    # else in this file (gate_leg / fetch_entry_rule) — a nationality IN the list is
+    # treated as eligible. This row's program label says US is the ONE nationality
+    # ineligible for Iran's standard tourist visa; a previous version of this seed
+    # set eligible_nationalities=["US"], which inverted that meaning and made US the
+    # ONLY nationality gate_leg would allow (silent ALLOW + real booking_ref for a
+    # genuinely ineligible traveler). eligible_nationalities is deliberately EMPTY
+    # here — do NOT list "US" (or any nationality) in this field to "document" who
+    # is restricted; that field means the opposite. An empty allow-list means this
+    # row can never specific-match any nationality, so IR (which has no
+    # VISA_REQUIRED wildcard — real per-nationality eligibility isn't seeded) falls
+    # through to the conservative "no rule" UNKNOWN flag for every nationality,
+    # including US (fail-conservative / HONESTY, matches GB/DE/CA today).
     {
         "dest_country": "IR", "program": "Iran visa - US nationals (ineligible for standard tourist visa)",
         "kind": EntryKind.VISA_REQUIRED,
-        "eligible_nationalities": ["US"],
+        "eligible_nationalities": [],
         "processing_lead_business_days": 30,
         "fee_cents": 0, "currency": "USD",
         "provenance": "seed:mfa.gov.ir-us-nationals-longstanding-restriction-2026",
@@ -1829,6 +1852,42 @@ def check_eligibility(
                 passport_expiry=passport_expiry,
                 simulate_source_unreachable=simulate_source_unreachable,
             )
+            # #52 surfacing-gap fix: the single-nationality path below ALWAYS surfaces a
+            # known compliance block honestly (verdict=BLOCK, blocking_legs). Multi-
+            # passport selection must meet the same honesty bar — it must never let a
+            # weaker/unverified secondary passport SILENTLY absorb a KNOWN block on the
+            # traveler's stated primary nationality. Detect that specific case: the
+            # selected passport differs from `nationality`, AND `nationality`'s OWN
+            # verdict for this leg was a genuine hard block (allowed=False, not merely
+            # unverified). Surface it as an explicit override — never silently.
+            if nationality and v.get("selected_passport") and (
+                v["selected_passport"].strip().upper() != nationality.strip().upper()
+            ):
+                primary_v = gate_leg(
+                    dest_country=dest,
+                    nationality=nationality,
+                    departure_date=dep,
+                    today=today,
+                    buffer_days=buffer_days,
+                    passport_expiry=passport_expiry,
+                    simulate_source_unreachable=simulate_source_unreachable,
+                )
+                if primary_v.get("allowed") is False:
+                    v["primary_passport_override"] = True
+                    v["primary_nationality"] = nationality.strip().upper()
+                    v["primary_block_reason"] = primary_v.get("reason")
+                    override_note = (
+                        f"Passport override: your primary passport "
+                        f"({nationality.strip().upper()}) is BLOCKED for this leg "
+                        f"({primary_v.get('reason')}) — this verdict instead uses "
+                        f"passport {v['selected_passport']} "
+                        f"({'unverified entry rule' if v.get('allowed') is None else v.get('kind')}). "
+                        f"Confirm which passport you will actually travel on before booking."
+                    )
+                    v["flag_advisory"] = " ".join(
+                        s for s in (override_note, v.get("flag_advisory")) if s
+                    )
+                    v["unverified_flag"] = True
         else:
             v = gate_leg(
                 dest_country=dest,
@@ -1860,9 +1919,16 @@ def check_eligibility(
                 total_visa_usd += int(li["usd_cents"])
 
     # Genuine hard blocks: allowed is explicitly False (known-ineligible / lead-time).
-    # Unverified flags: allowed is None (unknown rule → FLAG advisory, not a hard block).
+    # Unverified flags: allowed is None (unknown rule → FLAG advisory, not a hard block),
+    # OR a #52 primary_passport_override (a known block on the traveler's primary
+    # nationality was silently rescued by a different supplied passport) — surfaced as
+    # a flag even on the rare occasion the substitute passport's OWN verdict is a clean
+    # allowed=True, since the override itself is always disclosure-worthy.
     blocking = [v for v in per_leg if v["allowed"] is False]
-    flagged = [v for v in per_leg if v["allowed"] is None]
+    flagged = [
+        v for v in per_leg
+        if v["allowed"] is None or v.get("primary_passport_override")
+    ]
     bookable = len(blocking) == 0
     has_flags = len(flagged) > 0
     # D4 (verdict legibility): a HARD block → BLOCK; an unverified FLAG (no hard
@@ -1903,7 +1969,14 @@ def check_eligibility(
         "flagged_legs": [
             {"leg_id": v["leg_id"], "dest_country": v["dest_country"],
              "reason": v["reason"], "kind": v["kind"],
-             "flag_advisory": v.get("flag_advisory", "")}
+             "flag_advisory": v.get("flag_advisory", ""),
+             # #52 — present ONLY when a multi-passport selection overrode a KNOWN
+             # block on the traveler's stated primary nationality (see gate_leg call
+             # above); absent key on every other flagged leg (back-compat).
+             **({"primary_passport_override": True,
+                 "primary_nationality": v.get("primary_nationality"),
+                 "primary_block_reason": v.get("primary_block_reason")}
+                if v.get("primary_passport_override") else {})}
             for v in flagged
         ],
         "has_eligibility_flags": len(flagged) > 0,
@@ -2013,7 +2086,48 @@ def explain_block(verdict: dict[str, Any]) -> dict[str, Any]:
     lines: list[str] = []
     provs: list[dict[str, Any]] = []
     for v in verdict["per_leg"]:
-        if v["allowed"]:
+        # #52 passport-override rescue: the traveler's PRIMARY nationality was
+        # genuinely BLOCKED for this leg, and a substitute supplied passport
+        # rescued it — including the (common) case where the substitute's OWN
+        # verdict is a clean allowed=True. check_eligibility's comment is
+        # explicit that this is "always disclosure-worthy": a silent line-skip
+        # here would let a real, already-computed, safety-relevant advisory
+        # get swallowed by build_domain_answer's "no check on file" fallback
+        # (B5) even though grounded=True is claimed. So this case is emitted
+        # even though allowed=True, using the SAME override_note text that
+        # check_eligibility already built into flag_advisory (no new fact
+        # generation here — just surfacing what was already computed).
+        if v.get("primary_passport_override"):
+            lines.append(
+                v.get("flag_advisory")
+                or (
+                    f"PASSPORT OVERRIDE: your primary passport "
+                    f"({v.get('primary_nationality')}) is BLOCKED for "
+                    f"{v.get('dest_name', v.get('dest_country'))} "
+                    f"({v.get('primary_block_reason')}) — this trip instead "
+                    f"uses passport {v.get('selected_passport')}, which "
+                    + (
+                        "clears this leg."
+                        if v.get("allowed") is not False
+                        else "is ALSO blocked for this leg."
+                    )
+                    + " Confirm which passport you will actually "
+                    f"travel on before booking."
+                )
+            )
+            # Only treat this as a resolved rescue (and skip the BLOCKED
+            # template below) when the selected substitute passport actually
+            # clears the leg (allowed=True) or is merely unverified
+            # (allowed=None). If the substitute is ALSO hard-blocked
+            # (allowed=False), the override note alone would wrongly imply a
+            # rescue that never happened and would silently drop the
+            # remediation info (lead-days / earliest feasible date) — so fall
+            # through to append the standard BLOCKED template as well (which
+            # appends its own provenance below, so we don't double it here).
+            if v.get("allowed") is not False:
+                provs.append(v.get("provenance", {}))
+                continue
+        elif v["allowed"]:
             continue
         tmpl = _REASON_HEADLINES.get(v["reason"], "BLOCKED: {dest} ({reason}).")
         lines.append(tmpl.format(

@@ -4,6 +4,11 @@ recovery.py — L3-core reactive disruption-recovery for the Travel Guild.
 Design contract: the internal design spec §12.8 (reduced cut), §12.9
 (two-tier reactivity + baseline/secondary + pressure-test).
 
+NOT WIRED INTO THE LIVE SERVER (2026-07, deliberate — see the SCOPE NOTICE on
+RecoveryOrchestrator below for the full rationale). `orchestration/server.py`
+never invokes this module today; it is tested/verified library code, not a
+live feature.
+
 ## Overview
 
 L3-core recovery handles a single fault class: a hotel in the booked package
@@ -130,6 +135,31 @@ class RecoveryOrchestrator:
         )
         # result["outcome"] == "recovery_ready" → present to user for re-consent
         # call ro.commit_recovery(result, fresh_mandate) to complete.
+
+    ══════════════════════════════════════════════════════════════════════
+    SCOPE NOTICE (2026-07 adversarial audit, deliberate — read before wiring):
+    NOT CURRENTLY INVOKED BY THE LIVE SERVER. `orchestration/server.py` never
+    constructs or calls a RecoveryOrchestrator anywhere in its request path —
+    grep confirms zero references. This class, `recover()`, `commit_recovery()`,
+    and `recover_cascade()` are exercised today only from:
+      - the unit-test suites (`tests/test_l3_recovery.py`,
+        `tests/test_cascade_recovery.py`, etc. — mock merchant transport), and
+      - manual dev/verification scripts against a real merchant, run by hand —
+        NOT part of `make test` / CI.
+    A real hotel/flight disruption on a booking made through the live service
+    TODAY triggers NO automated recovery — the booking simply stands sold-out/
+    disrupted with nothing watching for it. Wiring this in for real is a
+    nontrivial feature, not a one-liner: the live server has (a) no disruption-
+    detection trigger (no merchant webhook, no polling job watching booked
+    hotel_ids for an availability flip), and (b) no session/state store that
+    keeps a completed booking's `original_booking` / `secondary_plan` /
+    `per_leg_candidates` around after `negotiate()` returns (they're transient,
+    in the negotiate() call's own return value only) — both are prerequisites
+    RecoveryOrchestrator.recover() needs and neither exists yet. This is an
+    explicit, considered scope decision (2026-07), not an oversight: treat this
+    module as tested LIBRARY code, ready to be wired in, but NOT a live feature
+    until that trigger + persistence work is scoped and built.
+    ══════════════════════════════════════════════════════════════════════
     """
 
     def __init__(
@@ -435,10 +465,12 @@ class RecoveryOrchestrator:
 
         if critic_result is not None and critic_result.get("decision") != "verified":
             violations = critic_result.get("violations", [])
-            v_summary = "; ".join(
-                f"{v['code']} ({v.get('leg_id','pkg')}): {v['detail'][:80]}"
-                for v in violations
-            )
+            # Same helper the orchestrator uses for its own cannot_satisfy
+            # violation summaries — a bare [:80] slice here silently amputated
+            # the trailing day-count off DATE_GAP/DATE_OVERLAP detail text
+            # (honesty-in-decline-reasons bug, task #79).
+            from orchestration.orchestrator import _fmt_violation
+            v_summary = "; ".join(_fmt_violation(v) for v in violations)
             logger.warning("recovery: Critic rejected recovery plan — %s", v_summary)
             return {
                 "outcome": RECOVERY_OUTCOME_CANNOT_SATISFY,
@@ -599,9 +631,21 @@ class RecoveryOrchestrator:
         checkout_id = recovery_ready.get("recovery_checkout_id", "")
         idempotency_key = recovery_ready.get("idempotency_key", f"recovery-commit-{uuid.uuid4()}")
 
+        # BUG (2026-07 adversarial audit): budget.commit's default/L2 autonomy path
+        # reads consent from the top-level `buyer_consent` bool, not from the nested
+        # `ap2_mandate`. commit_recovery() was passing ONLY `ap2_mandate`, so the
+        # merchant never saw consent and every recovery commit died on `needs_consent`,
+        # no matter how valid fresh_mandate was. Fix: also surface `buyer_consent: True`
+        # at the top level — this method is called ONLY after the caller has already
+        # obtained the human's ONE fresh re-consent (see the docstring above: "the
+        # human has reviewed the recovery plan and signed a fresh mandate over the new
+        # checkout_id"), so this is not a NEW consent, just carrying the SAME consent
+        # through the field the merchant actually reads. `ap2_mandate` is kept too
+        # (defense-in-depth / forward-compatible with an L3 recovery path in the future).
         commit_payload = {
             "user_id": user_id,
             "checkout_id": checkout_id,
+            "buyer_consent": True,
             "ap2_mandate": fresh_mandate,
             "idempotency_key": idempotency_key,
         }
@@ -842,10 +886,10 @@ class RecoveryOrchestrator:
         })
         if critic_result is not None and critic_result.get("decision") != "verified":
             violations = critic_result.get("violations", [])
-            v_summary = "; ".join(
-                f"{v['code']} ({v.get('leg_id','pkg')}): {v['detail'][:80]}"
-                for v in violations
-            )
+            # See recover()'s Critic-rejection branch above — same fix, same
+            # reason (task #79).
+            from orchestration.orchestrator import _fmt_violation
+            v_summary = "; ".join(_fmt_violation(v) for v in violations)
             return {
                 "outcome": RECOVERY_OUTCOME_CANNOT_SATISFY,
                 "reason": f"Re-route rejected by Critic: {v_summary}",

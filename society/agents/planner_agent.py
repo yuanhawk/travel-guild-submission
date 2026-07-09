@@ -547,6 +547,16 @@ class PlannerAgent(A2AAgent):
                 "dp_selected_total_cents": dp_sel["total_cents"] if dp_sel else None,
                 "dp_selected_quality": dp_sel["quality"] if dp_sel else None,
             }
+            # BUG3.2 (2026-07 adversarial audit, defense-in-depth): a leg-level
+            # counterparty_id was silently dropped here — the skeleton leg the
+            # orchestrator/Critic sees downstream never carried it, so the
+            # Critic's Gate 6b commit-time re-check (which DOES look for
+            # leg.get("counterparty_id")) never had a chance to catch a
+            # watchlisted/insolvent counterparty declared this way. Thread it
+            # through unchanged when the input leg supplied one.
+            leg_cp_id = leg.get("counterparty_id")
+            if isinstance(leg_cp_id, str) and leg_cp_id.strip():
+                leg_out["counterparty_id"] = leg_cp_id
             skeleton_legs.append(leg_out)
 
         # D2: build human-readable hazard advisory texts (sorted + deduped → var-0).

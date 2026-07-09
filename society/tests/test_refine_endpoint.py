@@ -14,6 +14,14 @@ Tests:
 8. swap_item only → refine_partial, NO re-plan.
 9. var-0: negotiate(new_request) produces a fresh digest → new idempotency_key differs from old.
 10. Plan with no legs (legacy body) → refine_unavailable.
+11. B3: plan_ready response carries the new structured "diff" field, and a city
+    swap that also shrinks total nights gets total_nights.side_effect=True.
+12. B5: a health/fraud/insurance/compliance QUESTION (question_domain set on the
+    parsed delta) returns outcome="domain_answer" with a new "answer" field —
+    grounded in the domain verdict already on the plan's envelope when present,
+    honestly ungrounded when not — WITHOUT calling negotiate() (no re-plan, same
+    idempotency_key, plan unchanged) and WITHOUT falling through to
+    refine_unsupported.
 
 SECURITY (IDOR fix, was VULN-AUTH-003 CVSS 8.1 HIGH): /refine now REQUIRES the
 two-tier session_token/owner_token ownership proof (see server.py's
@@ -110,6 +118,35 @@ _DELTA_UNSUPPORTED = {
     "reason": "I can't do that yet.",
 }
 
+# #116: one recognised op (add_leg) + one genuinely unrecognised op (typo'd
+# op name, outside the closed set) — the confirmed mixed-delta repro. Must
+# apply the valid op and honestly report the unrecognised one, never silently
+# drop it while reporting a clean success.
+_DELTA_MIXED_VALID_AND_GARBAGE = {
+    "ops": [
+        # "singapore" is a real city in this repo's sample catalog (unlike the
+        # private repo's "osaka" — see reference/README.md's "What's not here"
+        # table for why this export ships a small hand-authored sample instead
+        # of the full curated catalog); must resolve so this op actually applies.
+        {"op": "add_leg", "city": "singapore", "vibe": None, "position": "end"},
+        {"op": "add_lgs", "city": "porto"},
+    ],
+    "unsupported": False,
+    "reason": None,
+}
+
+# #116 regression guard: EVERY op unrecognised — must still hit the
+# total-failure safety net (refine_unsupported, no re-plan), not slip through
+# now that unrecognised ops get a `changed` entry of their own.
+_DELTA_ALL_GARBAGE = {
+    "ops": [
+        {"op": "frobnicate_legs", "city": "osaka"},
+        {"op": "another_bad_op"},
+    ],
+    "unsupported": False,
+    "reason": None,
+}
+
 # IDOR fix (tier 2, anonymous): every fixture row below is seeded ANONYMOUSLY
 # (user_id="") and bound to this owner_token at creation — every /refine call
 # that acts on it must present this SAME owner_token to pass the ownership gate.
@@ -131,6 +168,23 @@ def _seed_store(store: SqliteDashboardStore, *, status: str = "plan_ready") -> N
     if status == "booked":
         store.mark_booked(_PLAN_IDK, booking_ref="BK-test-001",
                           envelope=dict(_PLAN_ENVELOPE), confirmed_at="2026-01-01T00:00:00+00:00")
+
+
+def _seed_store_with_envelope_extra(store: SqliteDashboardStore, extra: dict) -> None:
+    """B5: same as _seed_store, but the persisted envelope carries EXTRA keys
+    (e.g. a health_verdict/compliance_verdict/fraud_verdict/insurance dict) —
+    mirrors what orchestrator.py's negotiate() actually attaches onto `result`
+    during a REAL initial planning pass (see build_domain_answer's docstring)."""
+    envelope = dict(_PLAN_ENVELOPE)
+    envelope.update(extra)
+    store.save_plan({
+        "idempotency_key": _PLAN_IDK,
+        "user_id": "",
+        "owner_token": _ANON_OWNER_TOKEN,
+        "package_total_cents": 500000,
+        "request": _STRUCTURED_REQUEST,
+        "envelope": envelope,
+    })
 
 
 def _login(c, user_id: str) -> str:
@@ -308,6 +362,35 @@ class TestRefineEndpoint(unittest.TestCase):
         # session_id is present.
         self.assertIsNotNone(body.get("session_id"))
 
+    def test_genuine_change_request_extend_by_2_days_still_structural_not_domain_answer(self):
+        """B5 anti-regression at the HTTP layer: a REAL change request ('extend
+        our trip by 2 days' — question_domain=None, a genuine op present) must
+        still take the ORIGINAL structural-change path (re-plan via
+        orch.negotiate(), new idempotency_key, outcome="plan_ready") — it must
+        NOT be misrouted into the new B5 domain_answer branch just because
+        that branch now exists."""
+        delta_extend = {
+            "ops": [{"op": "adjust_nights", "delta_nights": 2}],
+            "unsupported": False, "reason": None, "question_domain": None,
+        }
+        with patch("utils.followup_parser.parse_followup", return_value=delta_extend):
+            client, store, mock_orch = self._client_with_store_and_orch()
+            with client:
+                server._state.orch = mock_orch
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "extend our trip by 2 days",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["outcome"], "plan_ready", body)
+        self.assertNotEqual(body["outcome"], "domain_answer")
+        self.assertNotIn("answer", body)
+        # Real re-plan happened — new idempotency_key minted (unlike domain_answer,
+        # which keeps the SAME key because nothing was replanned).
+        self.assertNotEqual(body.get("idempotency_key"), _PLAN_IDK)
+
     def test_conversation_persists_and_threads(self):
         """Two refines thread through the same session: second gets the prior turn in context."""
         with patch("utils.followup_parser.parse_followup", return_value=_DELTA_CHEAPER):
@@ -365,6 +448,86 @@ class TestRefineEndpoint(unittest.TestCase):
         self.assertIsNotNone(conv)
         # Should have: seed turn + 2 user turns + 2 assistant turns = 5
         self.assertGreaterEqual(len(conv["turns"]), 4)
+
+    def test_plan_ready_response_includes_structured_diff(self):
+        """B3: /refine's plan_ready response carries the new "diff" field
+        (alongside "changed", kept verbatim for backward compat), and a city
+        swap (remove_leg + add_leg — NOT set_nights/adjust_nights) that also
+        shrinks total nights via apply_delta's default-nights redistribution
+        gets total_nights.side_effect=True — the exact live-prod finding this
+        task fixes: the user only asked to swap a city, never asked for a
+        shorter trip, and the OLD response had no structured way to say so."""
+        swap_idk = "trip-test-plan-swap-0001"
+        # "singapore"/"canggu" are real cities in this repo's sample catalog
+        # (unlike the private repo's "osaka"/"kyoto" -- see reference/README.md's
+        # "What's not here" table); must resolve so add_leg actually applies.
+        two_leg_request = {
+            "user_id": "",
+            "total_budget_cents": 500000,
+            "today": "2026-10-01",
+            "legs": [
+                {"city": "tokyo", "place_key": "tokyo", "checkin": "2026-10-15",
+                 "checkout": "2026-10-19", "nights": 4, "adults": 2},
+                {"city": "singapore", "place_key": "singapore", "checkin": "2026-10-19",
+                 "checkout": "2026-10-23", "nights": 4, "adults": 2},
+            ],
+        }
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        store.save_plan({
+            "idempotency_key": swap_idk,
+            "user_id": "",
+            "owner_token": _ANON_OWNER_TOKEN,
+            "package_total_cents": 500000,
+            "request": two_leg_request,
+            "envelope": {**_PLAN_ENVELOPE, "idempotency_key": swap_idk, "legs": two_leg_request["legs"]},
+        })
+
+        swap_delta = {
+            "ops": [
+                {"op": "remove_leg", "city": "singapore"},
+                {"op": "add_leg", "city": "canggu", "vibe": None, "position": "end"},
+            ],
+            "unsupported": False,
+            "reason": None,
+        }
+
+        def negotiate_fn(req):
+            return {
+                "_trip_request": req,
+                "outcome": "plan_ready",
+                "idempotency_key": "trip-test-plan-swap-0002",
+                "package_total_with_fees_cents": 500000,
+                "legs": req.get("legs") or [],
+                "day_plans": [],
+            }
+
+        with patch("utils.followup_parser.parse_followup", return_value=swap_delta):
+            with TestClient(server.build_app()) as client:
+                server._state.orch = _MockOrch(negotiate_fn)
+                r = client.post("/refine", json={
+                    "idempotency_key": swap_idk,
+                    "message": "swap Singapore for Canggu",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["outcome"], "plan_ready", body)
+        self.assertIn("diff", body)
+        self.assertIn("changed", body)  # backward-compat field untouched
+
+        diff = body["diff"]
+        self.assertEqual(diff["total_nights"]["old"], 8)
+        self.assertEqual(diff["total_nights"]["new"], 6)
+        self.assertEqual(diff["total_nights"]["delta"], -2)
+        self.assertTrue(diff["total_nights"]["side_effect"],
+                         "total nights shrank without an explicit nights op -- must be flagged")
+        self.assertEqual(diff["legs_removed"], [{"city": "singapore", "nights": 4, "side_effect": False}])
+        self.assertEqual(len(diff["legs_added"]), 1)
+        self.assertEqual(diff["legs_added"][0]["city"], "canggu")
+        self.assertFalse(diff["legs_added"][0]["side_effect"])
+        self.assertFalse(diff["total_budget_cents"]["side_effect"])
 
     def test_cannot_satisfy_returns_kept_previous(self):
         def fail_negotiate(req):
@@ -440,6 +603,329 @@ class TestRefineEndpoint(unittest.TestCase):
         body = r.json()
         self.assertEqual(body["outcome"], "refine_unavailable", body)
         self.assertIn("assistant_reply", body)
+
+    def test_mixed_valid_and_unrecognized_delta_applies_valid_and_reports_rest(self):
+        """#116: a delta mixing one valid add_leg with one unrecognised op
+        must NOT be silently swallowed. It must re-plan on the valid op
+        (plan_ready, safety net does not fire) AND the response's `changed`
+        must honestly name the unrecognised op as skipped — never a clean
+        success with zero trace of the dropped part of the request."""
+        from utils.followup_parser import UNSUPPORTED_OP_PREFIX
+        with patch("utils.followup_parser.parse_followup",
+                   return_value=_DELTA_MIXED_VALID_AND_GARBAGE):
+            client, store, mock_orch = self._client_with_store_and_orch()
+            with client:
+                server._state.orch = mock_orch
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "add singapore and also add_lgs porto",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        # The valid op applied → a normal re-plan happened (safety net did NOT fire).
+        self.assertEqual(body["outcome"], "plan_ready", body)
+        self.assertNotEqual(body.get("idempotency_key"), _PLAN_IDK)
+        changed = body.get("changed") or []
+        self.assertTrue(any("legs.add" in c and "singapore" in c for c in changed), changed)
+        # The garbage op is honestly reported, not silently dropped.
+        unsupported_entries = [c for c in changed if c.startswith(UNSUPPORTED_OP_PREFIX)]
+        self.assertEqual(len(unsupported_entries), 1, changed)
+        self.assertIn("add_lgs", unsupported_entries[0])
+
+    def test_fully_unrecognized_delta_still_returns_refine_unsupported(self):
+        """#116 regression guard: when EVERY op in the delta is unrecognised
+        (no valid op at all), the total-failure safety net must still fire —
+        refine_unsupported, no re-plan — exactly as it did before #116 added
+        `changed` entries for unrecognised ops. (The safety net filters those
+        entries out before testing `changed`, specifically so this case
+        doesn't regress into a false-success replan of an unmodified trip.)"""
+        with patch("utils.followup_parser.parse_followup", return_value=_DELTA_ALL_GARBAGE):
+            store = SqliteDashboardStore(":memory:")
+            set_store(store)
+            _seed_store(store)
+            negotiate_called = []
+
+            def tracking_negotiate(req):
+                negotiate_called.append(req)
+                return {"outcome": "plan_ready", "idempotency_key": "trip-x"}
+
+            with TestClient(server.build_app()) as client:
+                server._state.orch = _MockOrch(tracking_negotiate)
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "frobnicate the legs somehow",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["outcome"], "refine_unsupported", body)
+        # No re-plan happened, so the idempotency_key stays on the original plan.
+        self.assertEqual(body.get("idempotency_key"), _PLAN_IDK)
+        self.assertEqual(negotiate_called, [],
+                         "negotiate must NOT be called when nothing in the delta was recognised")
+
+
+class TestRefineDomainAnswer(unittest.TestCase):
+    """B5: /refine's third response mode — a health/fraud/insurance/compliance
+    QUESTION routed to build_domain_answer, WITHOUT calling negotiate() (see
+    followup_parser.build_domain_answer's docstring for why this is fast: a
+    pure read of the verdict already on the plan's envelope, no re-plan)."""
+
+    _DELTA_QUESTION_HEALTH = {
+        "ops": [], "unsupported": False, "reason": None, "question_domain": "health",
+    }
+    _DELTA_QUESTION_FRAUD = {
+        "ops": [], "unsupported": False, "reason": None, "question_domain": "fraud",
+    }
+    _DELTA_QUESTION_COMPLIANCE = {
+        "ops": [], "unsupported": False, "reason": None, "question_domain": "compliance",
+    }
+
+    def test_domain_answer_grounded_in_stored_verdict(self):
+        """The trip's envelope already carries a health_verdict (as a REAL
+        initial planning pass would attach) → grounded:True, informative
+        headline, plan UNCHANGED (same idempotency_key, no re-plan)."""
+        from agents.health_agent import assess as health_assess
+        health_verdict = health_assess(
+            legs=[{"place_key": "ethiopia", "departure_date": "2026-08-01"}],
+            today="2026-06-01",
+        )
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        _seed_store_with_envelope_extra(store, {"health_verdict": health_verdict})
+        with patch("utils.followup_parser.parse_followup",
+                   return_value=self._DELTA_QUESTION_HEALTH):
+            with TestClient(server.build_app()) as client:
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "is this covered if I get sick",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        body = r.json()
+        self.assertEqual(body["outcome"], "domain_answer", body)
+        # Plan unchanged — same idempotency_key, no new generation minted.
+        self.assertEqual(body["idempotency_key"], _PLAN_IDK)
+        self.assertIn("answer", body)
+        self.assertEqual(body["answer"]["domain"], "health")
+        self.assertTrue(body["answer"]["grounded"])
+        self.assertTrue(body["answer"]["headline"])
+        # Backward-compat: assistant_reply is ALWAYS present (an old FE that
+        # has never heard of "answer"/domain_answer still gets truthful prose).
+        self.assertEqual(body["assistant_reply"], body["answer"]["headline"])
+
+    def test_compliance_domain_answer_discloses_passport_override(self):
+        """[#88 HIGH / PR #117] full-stack regression pin: a real
+        compliance_verdict carrying a primary_passport_override rescue (primary
+        nationality genuinely BLOCKED, substitute passport a clean allowed=True
+        rescue) must reach the end user through the REAL /refine endpoint with
+        grounded:True AND a headline that discloses the override -- not the
+        generic "I don't have a check on file" masking message compliance_
+        agent.explain_block()'s pre-fix empty-headline bug produced via
+        build_domain_answer's `or` fallback."""
+        from agents.compliance_agent import check_eligibility
+        compliance_verdict = check_eligibility(
+            legs=[{"dest_country": "US", "departure_date": "2026-07-01", "leg_id": "0"}],
+            nationality="IN",
+            nationalities=["IN", "DE"],
+            today="2026-06-23",
+        )
+        # Sanity: this really is the clean-rescue shape the bug targets.
+        self.assertTrue(compliance_verdict["per_leg"][0].get("primary_passport_override"))
+        self.assertTrue(compliance_verdict["per_leg"][0].get("allowed"))
+
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        _seed_store_with_envelope_extra(store, {"compliance_verdict": compliance_verdict})
+        with patch("utils.followup_parser.parse_followup",
+                   return_value=self._DELTA_QUESTION_COMPLIANCE):
+            with TestClient(server.build_app()) as client:
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "am I actually allowed to enter on this trip",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        body = r.json()
+        self.assertEqual(body["outcome"], "domain_answer", body)
+        self.assertEqual(body["idempotency_key"], _PLAN_IDK)
+        self.assertEqual(body["answer"]["domain"], "compliance")
+        self.assertTrue(body["answer"]["grounded"])
+        headline = body["answer"]["headline"]
+        self.assertNotIn("I don't have a visa/entry-eligibility check on file", headline)
+        self.assertIn("BLOCKED", headline)
+        self.assertIn("IN", headline)
+        self.assertIn("DE", headline)
+        self.assertEqual(body["assistant_reply"], headline)
+
+    def test_domain_answer_honestly_ungrounded_when_domain_never_fired(self):
+        """No fraud_verdict on the envelope (this trip has no counterparties) →
+        grounded:False with an honest explanation, NOT refine_unsupported."""
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        _seed_store(store)  # plain envelope, no fraud_verdict
+        with patch("utils.followup_parser.parse_followup",
+                   return_value=self._DELTA_QUESTION_FRAUD):
+            with TestClient(server.build_app()) as client:
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "is my payment safe",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        body = r.json()
+        self.assertEqual(body["outcome"], "domain_answer", body)
+        self.assertFalse(body["answer"]["grounded"])
+        self.assertEqual(body["answer"]["domain"], "fraud")
+        self.assertIn("idempotency_key", body)
+        self.assertEqual(body["idempotency_key"], _PLAN_IDK)
+
+    def test_domain_answer_does_not_call_negotiate(self):
+        """A question must NEVER re-enter the re-plan machinery — assert
+        negotiate() is never invoked on the injected orch."""
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        _seed_store(store)
+        mock_orch = _CommitCapturingOrch()
+        with patch("utils.followup_parser.parse_followup",
+                   return_value=self._DELTA_QUESTION_HEALTH):
+            with TestClient(server.build_app()) as client:
+                server._state.orch = mock_orch
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "is this covered if I get sick",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        self.assertEqual(r.json()["outcome"], "domain_answer")
+        self.assertEqual(mock_orch.captured_commits, [])  # negotiate() never called
+
+    def test_domain_answer_conversation_persists(self):
+        """The question + answer are threaded into the conversation like any
+        other /refine turn (session_id returned, turns appended)."""
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        _seed_store(store)
+        with patch("utils.followup_parser.parse_followup",
+                   return_value=self._DELTA_QUESTION_FRAUD):
+            with TestClient(server.build_app()) as client:
+                r = client.post("/refine", json={
+                    "idempotency_key": _PLAN_IDK,
+                    "message": "is my payment safe",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+        body = r.json()
+        session_id = body.get("session_id")
+        self.assertTrue(session_id)
+        conv = store.get_conversation(session_id)
+        roles = [t["role"] for t in (conv.get("turns") or [])]
+        self.assertIn("user", roles)
+        self.assertIn("assistant", roles)
+
+
+class TestRefineShorthandOpShapeLaunchBlocker(unittest.TestCase):
+    """LAUNCH BLOCKER (live QA, 2026-07-08): a real single-leg trip, "swap
+    Tokyo for Singapore" (private-repo trace used Lisbon/Porto — swapped here
+    for cities that exist in this repo's sample catalog; see
+    reference/README.md's "What's not here" table). The live parser returned
+    ops in SHORTHAND shape ({"remove_leg":"tokyo"} / {"add_leg":{...}}, no "op"
+    key) instead of the documented {"op":"remove_leg","city":"tokyo"} shape.
+    apply_delta's dispatch (keyed off `op.get("op")`) silently dropped both
+    ops as unknown: changed==[], plan.legs stayed Tokyo-only, yet the endpoint
+    still reported outcome="plan_ready", unsupported=false, reason=None, and
+    build_assistant_reply fabricated a confident-sounding summary line.
+
+    This end-to-end test drives the REAL /refine handler (server.refine, real
+    apply_delta/compute_refine_diff/build_assistant_reply — only parse_followup's
+    LLM call and the orchestrator's negotiate() are stubbed, per this file's
+    existing harness pattern) with the EXACT malformed delta shape observed
+    live, over a real single-leg trip. Pre-fix this fails (Tokyo survives,
+    changed==[]); post-fix Singapore replaces Tokyo and `changed` truthfully
+    reflects the swap.
+    """
+
+    _TOKYO_IDK = "trip-test-plan-tokyo-0001"
+
+    _TOKYO_REQUEST = {
+        "user_id": "",
+        "total_budget_cents": 126000,
+        "today": "2026-10-01",
+        "legs": [
+            {"city": "tokyo", "place_key": "tokyo", "checkin": "2026-10-15",
+             "checkout": "2026-10-21", "nights": 6, "adults": 1},
+        ],
+    }
+
+    # The EXACT shape quoted in the live QA trace — op-name-as-key shorthand,
+    # no "op" field, unlike every hand-authored fixture elsewhere in this file.
+    _DELTA_SHORTHAND_SWAP = {
+        "ops": [
+            {"remove_leg": "tokyo"},
+            {"add_leg": {"city": "Singapore", "position": "end"}},
+        ],
+        "unsupported": False,
+        "reason": None,
+    }
+
+    def _seed_tokyo(self, store: SqliteDashboardStore) -> None:
+        store.save_plan({
+            "idempotency_key": self._TOKYO_IDK,
+            "user_id": "",
+            "owner_token": _ANON_OWNER_TOKEN,
+            "package_total_cents": 126000,
+            "request": self._TOKYO_REQUEST,
+            "envelope": {
+                "outcome": "plan_ready",
+                "idempotency_key": self._TOKYO_IDK,
+                "package_total_with_fees_cents": 126000,
+                "legs": self._TOKYO_REQUEST["legs"],
+                "day_plans": [],
+            },
+        })
+
+    def test_shorthand_swap_actually_replaces_tokyo_with_singapore(self):
+        def negotiate_fn(req):
+            # Mirrors this file's existing negotiate stubs: echoes req["legs"]
+            # back into the plan_ready envelope, exactly like the real
+            # orchestrator would for a plan-only re-negotiate.
+            return {
+                "_trip_request": req,
+                "outcome": "plan_ready",
+                "idempotency_key": "trip-test-plan-tokyo-0002",
+                "package_total_with_fees_cents": 126000,
+                "legs": req.get("legs") or [],
+                "day_plans": [],
+            }
+
+        store = SqliteDashboardStore(":memory:")
+        set_store(store)
+        self._seed_tokyo(store)
+
+        with patch("utils.followup_parser.parse_followup", return_value=self._DELTA_SHORTHAND_SWAP):
+            with TestClient(server.build_app()) as client:
+                server._state.orch = _MockOrch(negotiate_fn)
+                r = client.post("/refine", json={
+                    "idempotency_key": self._TOKYO_IDK,
+                    "message": "swap Tokyo for Singapore",
+                    "owner_token": _ANON_OWNER_TOKEN,
+                })
+
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+
+        # The plan must ACTUALLY reflect the swap — not silently stay on Tokyo.
+        plan_cities = [l.get("city") for l in (body.get("plan") or {}).get("legs") or []]
+        self.assertNotIn("tokyo", plan_cities,
+                          f"Tokyo must be gone from the returned plan; body={body}")
+        self.assertIn("singapore", plan_cities,
+                       f"Singapore must be present in the returned plan; body={body}")
+
+        # `changed` must truthfully record a real modification, not [].
+        self.assertTrue(body.get("changed"),
+                         f"a real city swap must not report changed=[]; body={body}")
+
+        # If the handler decided nothing could be applied, it must say so
+        # honestly (refine_unsupported/refine_partial) rather than claim
+        # plan_ready with an unchanged plan. Given the swap DID apply above,
+        # outcome must be the honest plan_ready success case.
+        self.assertEqual(body.get("outcome"), "plan_ready", body)
 
 
 class TestRefineVar0(unittest.TestCase):

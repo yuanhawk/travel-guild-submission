@@ -356,6 +356,32 @@ def _policy_provenance(policy_id: str, tier: str = SourceTier.SEEDED.value) -> d
 # ===========================================================================
 # 2. PREMIUM — NO-LLM-NUMBERS. Pure integer-cents from seed.
 # ===========================================================================
+#
+# #52 item 2 — KNOWN / ACCEPTED LIMITATION (documented, not silently swept under
+# the rug): the premium below is a pure function of (policy_id, insured_trip_
+# cost_cents) — it is flat regardless of HAZARD SEVERITY. A confirmed real
+# example: a cyclone-season trip and an off-season trip to the SAME destination
+# price identically, even though the traveler's actual loss exposure clearly
+# differs.
+#
+# A genuine SEVERITY *signal* already exists elsewhere in this codebase —
+# risk_agent.interruption_outlook() derives a closed-set likelihood_tier (low/
+# moderate/elevated/high) from the SAME Risk roll-up Insurance already consumes
+# via risk_reason_codes. But a signal is not a PRICING MODEL: nowhere in this
+# codebase (or in the §12.3 AFCA/PDS sourcing this premium formula is grounded
+# in) does a real, source-backed severity-to-premium MULTIPLIER exist. The
+# base_premium_cents/trip_cost_bps figures above are grounded in the cited
+# insurer tiers (§12.3 "Premium ≈ 6-9% of insured trip cost"); inventing a
+# "moderate = +10%, high = +30%"-style surcharge table would be exactly the
+# kind of ungrounded number NO-LLM-NUMBERS/DETERMINISTIC-STATUS exists to
+# prevent an LLM from minting — doing it by hand in Python is no more honest.
+#
+# Building a REAL severity-rated premium model (actuarial loss tables per
+# peril/tier, or a licensed rate-card feed) is a genuinely larger, separately-
+# scoped effort — out of scope here. Flagging it explicitly (this comment +
+# the module docstring's PREMIUM MODEL section) rather than shipping an
+# invented multiplier is the deliberate call for this fix pass.
+# ===========================================================================
 
 def compute_premium_cents(policy_id: str, insured_trip_cost_cents: int) -> int:
     """
@@ -369,6 +395,11 @@ def compute_premium_cents(policy_id: str, insured_trip_cost_cents: int) -> int:
     Formula: bps_component = (trip * bps + 5000) // 10000
       e.g. trip=120000, bps=600: (120000*600 + 5000) // 10000 = 72005000//10000 = 7200
       e.g. trip=120000, bps=950: (120000*950 + 5000) // 10000 = 114005000//10000 = 11400
+
+    KNOWN LIMITATION (#52 item 2, see the section banner above): this premium
+    does NOT vary with hazard severity — a real signal exists (risk_agent.
+    interruption_outlook's likelihood_tier) but no source-grounded severity-to-
+    premium mapping exists to wire it to; documented rather than invented.
     """
     pol = _POLICY_CATALOG.get(policy_id)
     if pol is None:

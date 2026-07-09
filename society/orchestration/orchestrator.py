@@ -88,7 +88,7 @@ from agents.destination_agent import (
 )
 from core.contracts import is_do_not_recommend_country
 from utils import emergency_feed as _emergency_feed
-from utils.intent_parser import CITY_TO_ISO2
+from utils.intent_parser import CITY_TO_ISO2, normalize_country_to_iso2
 from utils.intracity_transport import build_transfer_hops
 from providers.pricing import get_price_provider, UnavailableResult as _PriceUnavailable
 
@@ -96,6 +96,57 @@ logger = logging.getLogger(__name__)
 
 # Negotiation round cap (§4.5 guard)
 MAX_ROUNDS = 3
+
+# Cap on a single violation's `detail` text inside a cannot_satisfy decline
+# summary. 80 was too tight: DATE_GAP/DATE_OVERLAP detail strings ("Gap
+# between leg 'X' (checkout ...) and leg 'Y' (checkin ...) — N day(s)
+# missing.") run ~120+ chars, and the day-count is the LAST thing in the
+# string — an 80-char cut silently amputated the exact number the honesty-
+# in-decline-reasons principle exists to surface. 400 comfortably covers every
+# known violation detail template (DATE_GAP/DATE_OVERLAP, OVER_BUDGET,
+# OVER_CAPACITY, PRICE_MISMATCH, etc.) even with long leg_id/hotel_id values,
+# while still bounding the rare case where `detail` embeds an unbounded
+# upstream exception string (e.g. a merchant lookup_catalog failure). This is
+# a summary-length guard, not a UI truncation — never silent: `_fmt_violation`
+# below appends an explicit "…" marker when it actually cuts something, so a
+# reader can tell truncation happened instead of mistaking a cut sentence for
+# a complete one.
+_VIOLATION_DETAIL_MAX_CHARS = 400
+
+
+def _fmt_violation(v: dict) -> str:
+    """
+    Render one Critic violation as `CODE (leg_id): detail` for a cannot_satisfy
+    decline summary, bounding `detail` at _VIOLATION_DETAIL_MAX_CHARS.
+
+    Honesty-in-decline-reasons: if truncation actually happens, append an
+    explicit "…" so the cut is visible rather than silent (a bare slice reads
+    as a complete, if oddly-phrased, sentence — the reader has no way to know
+    a number got cut off the end). The full, untruncated violation is also
+    still available to callers via critic_result["violations"] /
+    result["critic_violations"] — this is only the short human-readable form.
+    """
+    detail = str(v.get("detail", ""))
+    if len(detail) > _VIOLATION_DETAIL_MAX_CHARS:
+        detail = detail[:_VIOLATION_DETAIL_MAX_CHARS].rstrip() + "…"
+    return f"{v['code']} ({v.get('leg_id', 'pkg')}): {detail}"
+
+# R0-decline (armed-conflict gate) — curated bare city-name collisions between
+# a bookable catalog city and a same-named city in a DO_NOT_RECOMMEND_COUNTRIES
+# member (2026-07 adversarial audit). CITY_TO_ISO2 is catalog-only by
+# construction (it maps a city name to whichever country's catalog entry
+# exists), so for a name shared with a country that has NO catalog inventory
+# it can only ever resolve to the bookable side — silently missing the
+# DO_NOT_RECOMMEND side entirely. This map plugs that hole: a BARE reference to
+# one of these city names (no explicit dest_country to disambiguate) is treated
+# conservatively (declined), rather than silently booked as the permissive
+# country. Extend this list if a future catalog city is found to collide with
+# a DO_NOT_RECOMMEND_COUNTRIES member's city of the same name.
+_AMBIGUOUS_CITY_CONFLICT_COUNTRIES: dict[str, frozenset[str]] = {
+    # Tripoli: catalog only has Tripoli, Lebanon (LB, bookable); Tripoli, Libya
+    # (LY) is DO_NOT_RECOMMEND and carries no catalog inventory of its own.
+    "tripoli": frozenset({"LY"}),
+}
 
 # SIMULATED prepaid wallet default seed (cents). SINGLE SOURCE — the server +
 # board import this so the demo wallet defaults to $5,000 everywhere. A direct
@@ -136,9 +187,52 @@ def _request_digest(trip_request: dict) -> str:
         # (The key itself is new, so digests differ from a pre-wallet build;
         # nothing pins historical digest values, so this is inert.)
         "wallet_balance_cents": trip_request.get("wallet_balance_cents", 0),
+        # #54 — overland_only participates in request identity: unlike persona (a soft
+        # preference, deliberately excluded), overland_only can change whether a leg
+        # pair is even bookable, so two requests that differ ONLY in this flag must NOT
+        # collide on the same idempotency_key/trip_id (that would risk reusing one
+        # request's checkout session for the other). Defaulted to False when ABSENT so
+        # a legacy caller (no key) keeps a stable digest — only an explicit True
+        # perturbs it. (The key itself is new, so digests differ from a pre-#54 build;
+        # nothing pins historical digest values, so this is inert.)
+        "overland_only": bool(trip_request.get("overland_only", False)),
     }
     blob = json.dumps(norm, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _package_digest(proposals: dict[str, dict | None]) -> str:
+    """
+    Stable 12-hex digest of the FINAL negotiated package (hotel_id + total_cents
+    per leg) at the moment of commit.
+
+    Adversarial-audit finding (var-0 drift, task #49 re-plan clamp): the merchant's
+    complete_checkout idempotency short-circuit (checkout.go 'SEV-1a') is keyed on
+    the caller's idempotency_key alone, which defaults to a digest of the raw
+    incoming trip_request (_request_digest) -- computed ONCE, before any veto/
+    re-plan. Two negotiate() calls with byte-identical trip content therefore
+    share that same base key even when one of them re-planned (veto -> cheaper
+    hotel) and the other's local proposal is still the pre-veto one: the second
+    call's complete_checkout gets idempotent-replayed with the FIRST call's real
+    (different, cheaper) booking, but the orchestrator's own day_plans/proposals
+    were never updated to match -- an internally inconsistent, dishonest result
+    (reports a hotel that was never actually booked) and, when the two calls are
+    compared byte-for-byte (var-0 self-check), a drift.
+    Folding this package digest into the idempotency_key used for THIS SPECIFIC
+    commit (not the earlier create_checkout/budget.check calls, which don't
+    finalize anything) preserves the double-click/duplicate-POST protection this
+    mechanism exists for (a genuine retry of the SAME request deterministically
+    re-derives the SAME final package, hence the SAME refined key, hence still
+    correctly replays) while ensuring that whenever a replay DOES occur, the
+    replayed data matches what this call independently computed anyway -- no
+    reconciliation gap, no drift.
+    """
+    norm = {
+        lid: {"hotel_id": (p or {}).get("hotel_id"), "total_cents": (p or {}).get("total_cents")}
+        for lid, p in sorted(proposals.items())
+    }
+    blob = json.dumps(norm, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +260,13 @@ _TIER_STAR_MAX = {"shoestring": 2, "budget": 3, "mid": 4, "luxury": 5}
 # intentionally have no floor: shoestring IS the bottom of the market, and luxury's
 # existing ceiling-only (no-op-when-uncapped) behaviour is unchanged (round-1 contract).
 _TIER_STAR_MIN = {"budget": 2, "mid": 3}
+# #52 item 6b — DISCLOSURE-ONLY expectation floor (distinct from _TIER_STAR_MIN,
+# which intentionally omits luxury/shoestring so a tight budget is never starved
+# into a false no_fit). Used only to decide whether to tell the traveler their
+# stated style and their stated budget disagree — never to filter/reject a
+# candidate. No entry for "shoestring" (its whole premise is cheap, so there is
+# no "too cheap for shoestring" mismatch to disclose).
+_TIER_MISMATCH_DISCLOSURE_FLOOR = {"budget": 2, "mid": 3, "luxury": 4}
 # tier -> per-night price ceiling in cents (backstop when star_rating is absent/0).
 _TIER_PER_NIGHT_CAP_CENTS = {
     "shoestring": 9000, "budget": 18000, "mid": 38000, "luxury": None
@@ -961,20 +1062,29 @@ class TravelOrchestrator:
             return _send_to_url(self._critic_url, payload, "itinerary.verify")
         return None  # No Critic configured — bypass gate
 
-    def _call_transport(self, legs: list[dict], persona: str = "default") -> dict | None:
+    def _call_transport(
+        self, legs: list[dict], persona: str = "default", overland_only: bool = False,
+    ) -> dict | None:
         """
         Call the Transport agent (transport.feasibility).
 
         legs: list of {leg_id, city, area, checkin, checkout} dicts.
         persona: optional traveller persona ("comfort" widens the rail-preference range); default
             "default" sends the legacy payload shape unchanged (var-0 / backward-compatible).
+        overland_only: #54 — request-level HARD no-fly constraint. False (default) sends the
+            legacy payload shape unchanged (var-0 / backward-compatible); True tells the
+            Transport agent to reject any edge whose only resolvable option is a flight.
 
         Returns the TransportResult dict, or None if no Transport agent is
         configured (M3b gate bypassed — backward-compatible with M3a tests).
         """
-        # Persona rides as an ADDITIVE payload field only when non-default → default callers send
-        # exactly {"legs": legs} as before (byte-identical wire payload).
-        payload = {"legs": legs} if persona == "default" else {"legs": legs, "persona": persona}
+        # Persona/overland_only ride as ADDITIVE payload fields only when non-default → a
+        # default caller sends exactly {"legs": legs} as before (byte-identical wire payload).
+        payload: dict[str, Any] = {"legs": legs}
+        if persona != "default":
+            payload["persona"] = persona
+        if overland_only:
+            payload["overland_only"] = True
         if self._transport_client is not None:
             return _send_to_client(
                 self._transport_client, payload, "transport.feasibility"
@@ -1561,6 +1671,7 @@ class TravelOrchestrator:
                 area_stage_dict=area_stage,
                 prefer_lodging_types=leg.get("prefer_lodging_types"),
                 avoid_lodging_types=leg.get("avoid_lodging_types"),
+                dest_country=leg.get("dest_country"),
             )
 
             if not cands:
@@ -1628,9 +1739,14 @@ class TravelOrchestrator:
             sym = _SYMBOLS.get(iso, iso + " ")
             return f"{sym}{_fmt_minor(val, iso)}"
 
-        # Determine local currency from primary destination
+        # Determine local currency from primary destination. #87: an EXPLICIT
+        # dest_country on the leg (the traveller's own stated destination) is
+        # authoritative and must win over a CITY_TO_ISO2 catalog guess (a bare
+        # city name can collide with a same-named city in a different country,
+        # e.g. 'victoria' -> CITY_TO_ISO2 'HK' vs an explicit Seychelles request).
         primary_city = (legs_input[0].get("city") or "").lower().strip()
-        dest_iso2 = CITY_TO_ISO2.get(primary_city)
+        primary_dest_country = (legs_input[0].get("dest_country") or "").strip().upper()
+        dest_iso2 = primary_dest_country or CITY_TO_ISO2.get(primary_city)
         local_iso: str | None = None
         if dest_iso2:
             local_iso = currency_for_country(dest_iso2.lower())
@@ -1694,6 +1810,56 @@ class TravelOrchestrator:
         }
 
     # ------------------------------------------------------------------
+    # #93/#94: backfill dest_country onto leg_meta (Planner-skeleton legs)
+    # ------------------------------------------------------------------
+
+    def _enrich_leg_meta_dest_country(self, leg_meta: dict[str, dict]) -> None:
+        """
+        leg_meta is built as ``{leg["leg_id"]: leg for leg in legs}`` from the
+        Planner agent's skeleton output (§ negotiate() build #30 comment,
+        ~line 2498) — the skeleton carries city/checkin/checkout/adults/
+        per_leg_budget_cents, but NEVER dest_country. That's why
+        self._trip_request_legs (the ORIGINAL trip_request legs, set at the
+        top of negotiate()) was introduced as a side-channel — but until now
+        nothing consulted it for leg_meta's consumers.
+
+        This backfills leg_meta[lid]["dest_country"] from
+        self._trip_request_legs by leg-N index, mirroring the src_leg lookup
+        pattern the day-planner activity_legs build already uses (the #87 fix
+        site, ~line 6262). Mutates leg_meta's leg dicts IN PLACE (the same
+        pattern used elsewhere for leg["hotel_lat"]/leg["day_plan"] etc.) —
+        additive only, never overwrites an already-present dest_country.
+
+        Makes dest_country available to:
+          - _propose_with_area_ladder's acc_payload → Accommodation's country
+            filter (#93 — a bare city search like "victoria" otherwise matches
+            ANY country's catalog rows under that name).
+          - _primary_dest_token / booking_ref minting (#94 — was reading a
+            leg_meta key that was always absent, silently falling through to
+            the CITY_TO_ISO2 guess every time).
+
+        No-op (byte-identical) when self._trip_request_legs is unset/short,
+        a leg_id doesn't match the "leg-N" convention, or dest_country was
+        already supplied directly on the leg (defensive; never observed today
+        since the skeleton doesn't carry the key at all).
+        """
+        trip_legs = getattr(self, "_trip_request_legs", None) or []
+        for lid, lm in leg_meta.items():
+            if not isinstance(lm, dict) or lm.get("dest_country"):
+                continue
+            if not isinstance(lid, str) or not lid.startswith("leg-"):
+                continue
+            try:
+                idx = int(lid.split("-", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            if 0 <= idx < len(trip_legs):
+                src_leg = trip_legs[idx] or {}
+                dest_country = src_leg.get("dest_country")
+                if dest_country:
+                    lm["dest_country"] = dest_country
+
+    # ------------------------------------------------------------------
     # Accommodation: gather FULL candidate set per leg (for DP, §2.1)
     # ------------------------------------------------------------------
 
@@ -1712,6 +1878,7 @@ class TravelOrchestrator:
         area_stage_dict: dict[str, int] | None = None,
         avoid_lodging_types: list[str] | None = None,
         prefer_lodging_types: list[str] | None = None,
+        dest_country: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Gather the FULL ranked candidate set for one leg (§2.1 DP pre-gather step).
@@ -1776,6 +1943,11 @@ class TravelOrchestrator:
                 "target_areas": cur_areas or None,
                 "avoid_lodging_types": avoid_lodging_types,
                 "prefer_lodging_types": prefer_lodging_types,
+                # #93: thread the leg's explicit dest_country through so Accommodation
+                # can filter merchant catalog rows by country too — a bare city search
+                # (e.g. "victoria") otherwise matches ANY country's inventory under
+                # that name and can propose the wrong country's hotel entirely.
+                "dest_country": dest_country,
             }
             try:
                 acc_result = self._call_accommodation(acc_payload)
@@ -1867,6 +2039,7 @@ class TravelOrchestrator:
                 "target_areas": None,   # city-wide — no area restriction
                 "avoid_lodging_types": avoid_lodging_types,
                 "prefer_lodging_types": prefer_lodging_types,
+                "dest_country": dest_country,   # #93: country filter, see PASS 1 above
             }
             wide_result = self._call_accommodation(wide_payload)
             if wide_result.get("fit") == "ok":
@@ -1943,6 +2116,7 @@ class TravelOrchestrator:
                         "target_areas": None,  # city-wide cheapest — no area filter
                         "avoid_lodging_types": avoid_lodging_types,
                         "prefer_lodging_types": prefer_lodging_types,
+                        "dest_country": dest_country,   # #93: country filter, see PASS 1 above
                     }
                     sweep_result = self._call_accommodation(sweep_payload)
                     if sweep_result.get("fit") != "ok":
@@ -2030,6 +2204,10 @@ class TravelOrchestrator:
                 "target_areas": target_areas.get(leg_id) or None,
                 "avoid_lodging_types": lm.get("avoid_lodging_types"),
                 "prefer_lodging_types": lm.get("prefer_lodging_types"),
+                # #93: dest_country backfilled onto leg_meta by
+                # _enrich_leg_meta_dest_country (see negotiate()'s DP/greedy
+                # paths) — country filter, mirrors _gather_candidates_for_dp.
+                "dest_country": lm.get("dest_country"),
             }
             try:
                 self._tracer("agent_started", "Accommodation", trip_id=self._trip_id,
@@ -2236,6 +2414,39 @@ class TravelOrchestrator:
             return {"outcome": "cannot_satisfy", "reason": "invalid_request",
                     "detail": f"total_budget_cents must be > 0 (got {total_budget_cents})",
                     "trip_id": surfaced_trip_id}
+        # Date-crash cluster (CRITICAL, adversarial finding): a same-day or
+        # inverted checkin/checkout leg used to escape all the way down to
+        # planner_agent._nights_between, which correctly raises ValueError
+        # ("checkout must be strictly after checkin") — but that raise turned
+        # into an A2A task state='failed', which _extract_task_data turned into
+        # an uncaught RuntimeError, which propagated out of negotiate() as an
+        # unhandled crash instead of an honest decline. Validate every leg's
+        # dates HERE, before any planner call, using the exact same semantics
+        # as _nights_between (checkout strictly after checkin) so this guard
+        # and the deep validation always agree. Malformed/missing date strings
+        # are just as fail-conservative: decline, never crash.
+        for _leg_idx, _leg in enumerate(_legs):
+            if not isinstance(_leg, dict):
+                return {"outcome": "cannot_satisfy", "reason": "invalid_request",
+                        "detail": f"leg {_leg_idx} is not a valid leg object",
+                        "trip_id": surfaced_trip_id}
+            _checkin = _leg.get("checkin")
+            _checkout = _leg.get("checkout")
+            try:
+                _ci = date.fromisoformat(_checkin)
+                _co = date.fromisoformat(_checkout)
+            except (TypeError, ValueError) as _exc:
+                return {"outcome": "cannot_satisfy", "reason": "invalid_request",
+                        "detail": f"leg {_leg_idx} ({_leg.get('city', '?')}) has malformed "
+                                  f"checkin/checkout — checkin={_checkin!r} "
+                                  f"checkout={_checkout!r} ({_exc})",
+                        "trip_id": surfaced_trip_id}
+            if _co <= _ci:
+                return {"outcome": "cannot_satisfy", "reason": "invalid_request",
+                        "detail": f"leg {_leg_idx} ({_leg.get('city', '?')}) has an invalid date "
+                                  f"range — checkout ({_co.isoformat()}) must be strictly after "
+                                  f"checkin ({_ci.isoformat()})",
+                        "trip_id": surfaced_trip_id}
 
         # ------------------------------------------------------------------
         # R0-decline: DO-NOT-RECOMMEND armed-conflict gate (EARLY TERMINAL).
@@ -2262,6 +2473,15 @@ class TravelOrchestrator:
         # (THE canonical predicate — no inlined parallel check), on the upper-cased
         # ISO2 code; the blocked-country list in the message is sorted() for a
         # deterministic string.
+        #
+        # 2026-07 adversarial audit fix #1 — ISO3/full-name bypass: dest_country
+        # was matched EXACTLY against the ISO2 set, so 'AFG' or 'Afghanistan'
+        # (instead of 'AF') skipped the decline entirely (Kabul failed closed only
+        # "by accident" — no catalog inventory; a covered country WITH inventory,
+        # e.g. Ukraine, could plausibly have booked). Fix: normalize every
+        # dest_country reference to ISO2 via intent_parser.normalize_country_to_iso2
+        # — THE canonical country-reference normalizer (ISO2/ISO3/full-name → ISO2,
+        # reused rather than re-derived here) — BEFORE the membership check.
         declined_countries: list[str] = []
         for leg in _legs:
             if not isinstance(leg, dict):
@@ -2274,17 +2494,33 @@ class TravelOrchestrator:
             # (e.g. 'kyiv'), and that trip must STILL decline. Both candidate codes
             # are checked through the canonical predicate.
             candidates: list[str] = []
-            dc = leg.get("dest_country")
-            if isinstance(dc, str) and dc.strip():
+            dc_raw = leg.get("dest_country")
+            dc = normalize_country_to_iso2(dc_raw) if isinstance(dc_raw, str) and dc_raw.strip() else ""
+            if dc:
                 candidates.append(dc)
             city = leg.get("city")
-            if isinstance(city, str) and city.strip():
-                city_dc = CITY_TO_ISO2.get(city.strip().lower())
+            city_key = city.strip().lower() if isinstance(city, str) and city.strip() else ""
+            if city_key:
+                city_dc = CITY_TO_ISO2.get(city_key)
                 if city_dc:
                     candidates.append(city_dc)
+                # 2026-07 adversarial audit fix #2 — ambiguous city-name collision:
+                # a bare city name that names BOTH a bookable city AND a (same-
+                # named) city in a DO_NOT_RECOMMEND country (e.g. "tripoli" is
+                # Tripoli, Lebanon [catalog] AND Tripoli, Libya [DO_NOT_RECOMMEND,
+                # no catalog inventory — so CITY_TO_ISO2, which is catalog-only by
+                # construction, can NEVER surface the Libya side]) must NOT
+                # silently resolve to the permissive country. Conservative rule:
+                # a BARE city reference (no explicit dest_country to disambiguate)
+                # is treated as potentially naming the DO_NOT_RECOMMEND side too —
+                # decline rather than silently pick the bookable one. An explicit
+                # dest_country on the leg counts as disambiguation (the caller
+                # named a specific country) and skips this conservative add.
+                if not dc:
+                    candidates.extend(_AMBIGUOUS_CITY_CONFLICT_COUNTRIES.get(city_key, ()))
             for cand in candidates:
                 if is_do_not_recommend_country(cand):
-                    declined_countries.append(cand.strip().upper())
+                    declined_countries.append(normalize_country_to_iso2(cand))
         if declined_countries:
             return self._do_not_recommend_block_result(
                 declined_countries=sorted(set(declined_countries)),
@@ -2420,6 +2656,22 @@ class TravelOrchestrator:
         # when no Risk agent is wired → S1–S5 are byte-identical (no new key).
         # ------------------------------------------------------------------
         risk_assessment = self._assess_risk_signals(legs_input)
+
+        # #region-fix (2026-07 adversarial audit): expose leg_id -> Risk's
+        # ALREADY-RESOLVED region (risk_agent.region_for_city) for the
+        # day-planner payload block in _run_negotiation_rounds, whose in-scope
+        # `legs`/`leg_meta` is the Planner skeleton and carries no region key.
+        # Same per-negotiation self-state pattern as self._trip_request_legs
+        # above (negotiate() is serialized under the server's orch_lock).
+        # Without this, day_planner_agent.build_day_plan's bad-weather
+        # contingency (derive_bad_weather_days(region, ...)) NEVER receives a
+        # region on any real call — it always silently no-ops, despite passing
+        # its own unit tests (which supply region directly).
+        self._risk_region_by_leg: dict[str, str | None] = {
+            pleg.get("leg_id"): pleg.get("region")
+            for pleg in (risk_assessment.get("per_leg", []) if isinstance(risk_assessment, dict) else [])
+            if isinstance(pleg, dict)
+        }
 
         # ------------------------------------------------------------------
         # R0b-gates: CONTEXTUAL eligibility GATES (Health + Compliance), ONE-SHOT
@@ -2565,7 +2817,13 @@ class TravelOrchestrator:
             # buried only inside *_verdict is effectively a silent pass for any
             # UI that renders top-level fields — so lift the advisory texts to a
             # single result["advisories"] list the front end must show.
-            advisories: list[str] = []
+            # #51/BUG8 — SEED from any advisories _success_result already set (e.g.
+            # the day-planner-degraded note) rather than starting from an empty
+            # list: this block's final `result["advisories"] = advisories` is a
+            # REPLACE, not a merge, so starting empty would silently drop a
+            # caveat that was already there whenever any of compliance/health/
+            # risk/day-plan-notes also fire.
+            advisories: list[str] = list(result.get("advisories") or [])
             if isinstance(compliance_verdict, dict):
                 for leg in compliance_verdict.get("flagged_legs", []) or []:
                     adv = (leg or {}).get("flag_advisory")
@@ -2616,12 +2874,116 @@ class TravelOrchestrator:
             # rendering top-level advisories — a silent gap. CONTEXTUAL: only legs
             # that produced a note contribute (a fully-covered leg adds nothing), so a
             # trip whose day plans are clean is unchanged; deterministic list order.
+            #
+            # #B1 — a ZERO POI-CATALOG COVERAGE leg (catalog_hit=False) is handled
+            # SEPARATELY below with a dedicated, hotel-aware advisory instead of being
+            # lifted verbatim here: the day-planner's own note is honest but scoped to
+            # what IT knows (no POI/restaurant data for this city) — it has no
+            # visibility into whether a REAL, CHARGED hotel booking exists for the same
+            # leg (a separate merchant catalog, keyed differently — the Bali incident:
+            # a genuinely empty day-by-day plan silently rode along with a real
+            # payment). The orchestrator DOES have that context here, so it crafts the
+            # one advisory that matters most for this leg instead of a generic note.
             for plan in result.get("day_plans", []) or []:
-                if not isinstance(plan, dict):
+                if not isinstance(plan, dict) or self._is_zero_poi_coverage_leg(plan):
                     continue
                 for note in plan.get("notes", []) or []:
                     if note:
                         advisories.append(str(note))
+            # #B1 fail-closed (not fail-open) honesty guard: a leg whose day-planner
+            # lookup was a genuine catalog miss (catalog_hit=False) AND which produced
+            # a genuinely EMPTY day-by-day plan (no attractions and no meals at all —
+            # what the traveler actually sees) still gets a real, charged hotel booking
+            # from the separate merchant catalog. Gating on BOTH conditions (not
+            # catalog_hit alone) is deliberate: this codebase's own narration layer
+            # documents that a catalog MISS can still carry real sub-area POIs (the
+            # Bali case — "catalog_hit is NOT the gate"), so firing on catalog_hit
+            # alone would wrongly tell a traveler "we have no activity data" for a leg
+            # that actually got a full itinerary. It also stays scoped to genuine
+            # zero-coverage MISSES (not a THIN catalog that still partially covers a
+            # city — a catalog_hit=True leg never triggers this). Least-disruptive
+            # honest fix: this is a data-coverage gap, not a legal/safety blocker (a
+            # real, bookable hotel exists and the rest of the trip is valid) — so it
+            # surfaces as a clear advisory in THIS SAME response rather than declining
+            # the booking outright, the same non-fatal-advisory pattern already used
+            # above for risk-degraded, transport-unverified, and tier-mismatch gaps.
+            # Deterministic list order (day_plans is already emitted in a stable order).
+            # Wording depends on WHICH money-state this response describes: the
+            # default atomic path (commit=True, self._plan_only False) has already
+            # charged a real hotel booking by the time this response is built (the
+            # exact Bali incident shape); the opt-in two-phase CONSENT SPLIT
+            # (commit=False) only HOLDS a hotel selection pending a separate
+            # /confirm — calling that a "confirmed" booking would itself be
+            # dishonest, so it gets the accurate "held" phrasing instead (mirrors
+            # the wallet's own "Held ... not yet charged" language above).
+            _hotel_state = (
+                "a hotel selection is held for you pending confirmation"
+                if getattr(self, "_plan_only", False)
+                else "you'll get a confirmed hotel booking"
+            )
+            for plan in result.get("day_plans", []) or []:
+                if not isinstance(plan, dict) or not self._is_zero_poi_coverage_leg(plan):
+                    continue
+                city_label = str(plan.get("city") or "this destination").strip().title() or "this destination"
+                advisories.append(
+                    f"We don't have detailed day-by-day activity data for {city_label} "
+                    f"yet — {_hotel_state}, but no curated itinerary "
+                    f"(attractions/restaurants) for this leg. Please research things "
+                    f"to do there independently."
+                )
+            # #51/BUG8 (Split->Vis) — lift the transport UNVERIFIED-edge caveats
+            # (e.g. a water crossing with no seeded ferry route) into this SAME
+            # top-level advisories list every other warning uses. Previously only
+            # result["transport_unverified"] carried this — a key the front end
+            # does not render — so a trip could book SUCCESSFULLY with a real
+            # booking_ref while its only transfer was internally feasible=False
+            # and the user never saw the caveat. CONTEXTUAL: only fires when the
+            # Transport agent actually flagged an unverified edge.
+            for edge in result.get("transport_unverified", []) or []:
+                if not isinstance(edge, dict):
+                    continue
+                fc = (edge.get("from_city") or "?").title()
+                tc = (edge.get("to_city") or "?").title()
+                why = edge.get("reason") or "no verified transfer data for this leg"
+                advisories.append(
+                    f"Transport unverified: {fc} → {tc} — {why} Confirm "
+                    f"this transfer is actually possible before relying on this "
+                    f"itinerary."
+                )
+            # #52 item 6b — vibe/budget-tier mismatch disclosure. The user stated a
+            # qualitative style tier ("luxury, $500"), but the tier filter's floor is
+            # deliberately absent at the extremes (luxury/shoestring carry no
+            # _TIER_STAR_MIN — see _filter_candidates_by_tier) precisely so a tight
+            # budget is never starved into a false no_fit. That means a "luxury"
+            # request whose budget can only afford a 2-star property was previously
+            # booked with ZERO disclosure of the divergence. Surface it honestly
+            # rather than silently downgrade — CONTEXTUAL: only checks legs when the
+            # user actually stated a tier with a real expectation floor; a plain
+            # trip (no tier) or a tier with no floor concept (shoestring) is
+            # unaffected (var-0).
+            _tier = trip_request.get("budget_tier")
+            _tier_floor = _TIER_MISMATCH_DISCLOSURE_FLOOR.get(_tier or "")
+            if _tier_floor and isinstance(result, dict):
+                _mismatch = []
+                for _lg in result.get("legs", []) or []:
+                    if not isinstance(_lg, dict):
+                        continue
+                    try:
+                        _star = float(_lg.get("star_rating") or 0)
+                    except (TypeError, ValueError):
+                        _star = 0.0
+                    if _star > 0 and _star < _tier_floor:
+                        _mismatch.append((_lg.get("city") or _lg.get("leg_id") or "?", _star))
+                if _mismatch:
+                    _detail = ", ".join(
+                        f"{str(c).title()} ({s:g}-star)" for c, s in _mismatch
+                    )
+                    advisories.append(
+                        f"You asked for a '{_tier}' style trip, but the stated "
+                        f"budget could only afford: {_detail} — well below what "
+                        f"'{_tier}' typically means. Increase your budget or relax "
+                        f"the style if this divergence matters to you."
+                    )
             if advisories:
                 result["advisories"] = advisories
 
@@ -2849,11 +3211,26 @@ class TravelOrchestrator:
         minor = convert_usd_cents(usd_cents, home_iso)  # None if unseeded
         if minor is None:
             return  # honest decline: unseeded currency → NO fabricated figure
-        # local currency for exchange-timing advice (best-effort; advisory only)
-        primary_city = ((result.get("legs") or [{}])[0].get("city") or "").lower().strip()
+        # local currency for exchange-timing advice (best-effort; advisory only).
+        # #87: prefer the ORIGINAL request's EXPLICIT dest_country for the primary
+        # (first booked) leg — it's authoritative — over a CITY_TO_ISO2 catalog
+        # guess from the bare city name, which can collide across countries
+        # (e.g. 'victoria' -> CITY_TO_ISO2 'HK' vs an explicit Seychelles request).
+        primary_leg = (result.get("legs") or [{}])[0]
+        primary_city = (primary_leg.get("city") or "").lower().strip()
+        primary_leg_id = primary_leg.get("leg_id")
+        primary_dest_country = ""
+        for req_leg in trip_request.get("legs", []) or []:
+            if not isinstance(req_leg, dict):
+                continue
+            if (req_leg.get("leg_id") == primary_leg_id
+                    or (req_leg.get("city") or "").lower().strip() == primary_city):
+                primary_dest_country = (req_leg.get("dest_country") or "").strip().upper()
+                break
+        primary_iso2 = primary_dest_country or CITY_TO_ISO2.get(primary_city)
         local_iso = currency_for_country(
-            (CITY_TO_ISO2.get(primary_city) or "").lower()
-        ) if primary_city else None
+            (primary_iso2 or "").lower()
+        ) if primary_iso2 else None
         timing = exchange_timing_advice(local_iso, home_iso) if local_iso else None
         result["currency_review"] = {
             "display_currency": home_iso,
@@ -3318,6 +3695,116 @@ class TravelOrchestrator:
     # PASS-THROUGH (returns None / no-op) otherwise → S1–S5 byte-identical.
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_zero_poi_coverage_leg(plan: dict) -> bool:
+        """#B1 — True iff this day-plan is a GENUINE zero-POI-coverage miss: the
+        catalog lookup missed (catalog_hit is exactly False) AND the produced plan
+        is actually empty (no attractions and no non-null meal on any day — exactly
+        what the traveler sees as "Nothing scheduled this day yet").
+
+        Both conditions are required on purpose. This codebase's narration layer
+        documents (test_itinerary_narration_cov3 / test_itinerary_narrative_cov3)
+        that a catalog MISS can still carry real sub-area POIs (the Bali case:
+        "catalog_hit is NOT the gate"), so keying the "we have no activity data for
+        this city" advisory on catalog_hit alone could dishonestly warn about a leg
+        that actually received a full itinerary. The catalog_hit=False half also
+        keeps this scoped to true misses, never a THIN catalog (catalog_hit=True)
+        that merely under-covers a city.
+
+        PURE read over the plan dict — no LLM, no clock, no new state (var-0)."""
+        if not isinstance(plan, dict) or plan.get("catalog_hit") is not False:
+            return False
+        for day in plan.get("days", []) or []:
+            if not isinstance(day, dict):
+                continue
+            if day.get("attractions"):
+                return False
+            meals = day.get("meals")
+            if isinstance(meals, dict) and any(m for m in meals.values()):
+                return False
+        return True
+
+    @staticmethod
+    def _leg_water_hazard(risk_assessment: dict | None, leg_id: str) -> bool:
+        """
+        #52 item 8 — True iff Risk flagged an active HIGH/AVOID water-related
+        hazard (a cyclone or flood AVOID window) for THIS specific leg. PURE
+        lookup over risk_assessment["per_leg"] (see risk_agent.assess_leg) — no
+        LLM, no new risk logic invented; just reads the signal Risk already
+        computes. False (no filtering) whenever Risk is not wired, the leg is
+        not found, or the leg's hazard is present but not at AVOID severity —
+        this is a DEPRIORITIZATION signal, not a new block, so it stays
+        deliberately conservative about when it fires.
+        """
+        if not isinstance(risk_assessment, dict):
+            return False
+        for sig in risk_assessment.get("per_leg", []) or []:
+            if not isinstance(sig, dict) or sig.get("leg_id") != leg_id:
+                continue
+            if not sig.get("decisions", {}).get("avoid_window"):
+                return False
+            for adv in sig.get("advisory", []) or []:
+                if (isinstance(adv, dict)
+                        and adv.get("type") in ("cyclone_window", "flood_season")
+                        and adv.get("severity") == "high"):
+                    return True
+            return False
+        return False
+
+    @staticmethod
+    def _flag_unresolved_legs(
+        verdict: dict | None,
+        unresolved: list[tuple[int, str]],
+        *,
+        total_legs: int,
+        flagged_key: str,
+        id_key: str,
+        reason_key: str,
+        reason_value: str,
+        ok_verdict: str,
+        flagged_verdict: str,
+        has_flags_key: str,
+    ) -> None:
+        """
+        #52 (item 5) — a leg that never resolved to a place_key/dest_country (e.g.
+        the diacritic-mismatch bug this fix also closes at the root — see
+        intent_parser._load_city_to_iso2 / _ascii_fold_city) was previously just
+        DROPPED from the legs sent to Health/Compliance and logged — the aggregate
+        then read as fully clean (verdict=CAN_COMPLETE/ALLOW) when it was actually
+        INCOMPLETE. Mutate `verdict` IN PLACE so an unresolved leg is honestly
+        flagged (never silently equivalent to "assessed and clean"): appended to
+        the same flagged_destinations/flagged_legs list the UI already renders,
+        the headline verdict downgraded off its "all clear" value, and explicit
+        legs_assessed/legs_total counters added. Does NOT newly block the booking
+        (advisory-only, matching the existing "unverified" honesty pattern) — a
+        genuine hard block still requires a real gate finding one.
+        No-op when `verdict` is None (the call itself failed/errored — that path
+        already fails conservative) or there is nothing unresolved.
+        """
+        if not unresolved or not isinstance(verdict, dict):
+            return
+        n = len(unresolved)
+        for leg_idx, city in unresolved:
+            verdict.setdefault(flagged_key, [])
+            verdict[flagged_key].append({
+                id_key: f"leg-{leg_idx}",
+                reason_key: reason_value,
+                "flag_advisory": (
+                    f"Leg {leg_idx} ('{city}') could not be matched to a known "
+                    f"country — this leg was NOT assessed ({n} of {total_legs} "
+                    f"legs on this trip could not be assessed). Verify entry/"
+                    f"health requirements for it independently before booking."
+                ),
+            })
+        verdict[has_flags_key] = True
+        if verdict.get("verdict") == ok_verdict:
+            verdict["verdict"] = flagged_verdict
+        verdict["unresolved_legs"] = [
+            {"leg_index": i, "city": c} for i, c in unresolved
+        ]
+        verdict["legs_assessed"] = total_legs - n
+        verdict["legs_total"] = total_legs
+
     def _run_health_gate(
         self, trip_request: dict, legs_input: list[dict]
     ) -> dict | None:
@@ -3357,6 +3844,7 @@ class TravelOrchestrator:
         # Health for a plain trip (health_active already gated that), so S1–S5 are
         # unaffected; it only widens an ALREADY-firing gate to cover all its legs.
         health_legs = []
+        health_unresolved: list[tuple[int, str]] = []  # #52 item 5 — see _flag_unresolved_legs
         for i, leg in enumerate(legs_input):
             place_key = leg.get("place_key")
             dest_country = leg.get("dest_country")
@@ -3376,6 +3864,7 @@ class TravelOrchestrator:
                     "orchestrator: health gate active but leg %d city unresolved "
                     "to a country — entry requirements NOT verified for it", i,
                 )
+                health_unresolved.append((i, str(leg.get("city") or "")))
         if not health_legs:
             return None  # no health condition in this scenario → pass-through
         payload: dict[str, Any] = {"legs": health_legs}
@@ -3390,6 +3879,13 @@ class TravelOrchestrator:
         _held = trip_request.get("held_vaccine_certs")
         if isinstance(_held, (list, tuple)) and _held:
             payload["held_vaccine_certs"] = [str(c) for c in _held]
+        # #52 — thread the traveler's stated nationality through as a REASONABLE
+        # (not perfect) transit-origin proxy for leg 0's origin-conditional
+        # mandates (e.g. yellow fever) when this trip has no earlier leg to derive
+        # a real transit chain from. Same field Compliance already keys off; only
+        # added when present, so a trip with no nationality is byte-identical.
+        if trip_request.get("nationality"):
+            payload["origin_nationality"] = trip_request["nationality"]
         try:
             self._tracer("agent_started", "Health", trip_id=self._trip_id, summary="checking health requirements...")
         except Exception:  # noqa: BLE001
@@ -3410,6 +3906,15 @@ class TravelOrchestrator:
                 "flag": True,
                 "advisory": "health errored — conservative block",
             }
+        # #52 item 5 — honestly flag any leg dropped above (never silently equivalent
+        # to "assessed and clean"). No-op when nothing was dropped.
+        self._flag_unresolved_legs(
+            verdict, health_unresolved, total_legs=len(legs_input),
+            flagged_key="flagged_destinations", id_key="leg_id",
+            reason_key="gate_reason", reason_value="BLOCK_UNKNOWN_SLATE_CONSERVATIVE",
+            ok_verdict="can_complete", flagged_verdict="can_complete_with_flags",
+            has_flags_key="has_health_flags",
+        )
         if verdict is not None:
             logger.info(
                 "orchestrator: health gate verdict=%s bookable=%s fees=%d¢ jabs=%d",
@@ -3486,6 +3991,7 @@ class TravelOrchestrator:
         # gate to cover all its legs, so S1–S5 (neither nationality nor
         # dest_country) are untouched.
         comp_legs = []
+        comp_unresolved: list[tuple[int, str]] = []  # #52 item 5 — see _flag_unresolved_legs
         for i, leg in enumerate(legs_input):
             dest_country = leg.get("dest_country")
             if not dest_country:
@@ -3503,6 +4009,7 @@ class TravelOrchestrator:
                     "orchestrator: compliance gate active but leg %d city unresolved "
                     "to a country — visa eligibility NOT verified for it", i,
                 )
+                comp_unresolved.append((i, str(leg.get("city") or "")))
         if not comp_legs:
             return None  # no dest_country resolvable on any leg → nothing to check
         # If nationality is absent, run with empty string → all legs get FLAG advisory
@@ -3544,6 +4051,15 @@ class TravelOrchestrator:
                 "flag": True,
                 "advisory": "compliance errored — conservative block",
             }
+        # #52 item 5 — honestly flag any leg dropped above (never silently equivalent
+        # to "assessed and clean"). No-op when nothing was dropped.
+        self._flag_unresolved_legs(
+            verdict, comp_unresolved, total_legs=len(legs_input),
+            flagged_key="flagged_legs", id_key="leg_id",
+            reason_key="reason", reason_value="BLOCK_UNKNOWN_RULE_CONSERVATIVE",
+            ok_verdict="can_satisfy", flagged_verdict="can_satisfy_with_flags",
+            has_flags_key="has_eligibility_flags",
+        )
         if verdict is not None:
             logger.info(
                 "orchestrator: compliance gate verdict=%s bookable=%s visa_fee=%d¢ "
@@ -3571,11 +4087,36 @@ class TravelOrchestrator:
     def _run_fraud_gate(self, trip_request: dict) -> dict | None:
         """
         Fraud counterparty-solvency advisory GATE #1 (CONTEXTUAL, pre-commit).
-        Fires ONLY when the trip carries explicit counterparties (a top-level
-        ``counterparties`` list OR ``carriers`` on a leg/trip — the DC-fraud
-        shape). A plain lodging-only Bali/WA trip carries none → None
-        (pass-through). The live Critic re-checks the SAME seeded band at commit
-        time (gate #2), so this advisory filter never replaces the commit check.
+        Fires when the trip carries explicit counterparties — a top-level
+        ``counterparties`` list, ``carriers`` on a leg/trip (the DC-fraud
+        shape), OR a per-LEG ``counterparty_id`` (a documented, unit-tested
+        leg field — see critic_agent.py Gate 6b). A plain lodging-only
+        Bali/WA trip carries none of these → None (pass-through). The live
+        Critic re-checks the SAME seeded band at commit time (gate #2), so
+        this advisory filter never replaces the commit check.
+
+        BUG (2026-07 adversarial audit): this gate previously read ONLY the
+        two top-level shapes above and never looked at a leg's own
+        ``counterparty_id`` — so a watchlisted/insolvent carrier placed
+        directly on a leg (rather than in the top-level ``counterparties``/
+        ``carriers`` lists) produced ZERO fraud signal here. Harvesting it
+        below is defense-in-depth #1 of 2 for that finding; #2 is threading
+        the same leg-level counterparty_id through to the Critic's commit-time
+        re-check (see the ``candidate_legs`` build in ``_run_negotiation_rounds``).
+
+        SCOPE (organic vs. synthetic detection — read before assuming broader
+        coverage): the solvency table this gate (and the Critic's re-check)
+        consult is a SEEDED, hand-curated set of known-bad demo counterparty
+        ids (see fraud_agent.py's ``_SOLVENCY_BY_COUNTERPARTY``) — there is no
+        live registry/feed of real-world carrier insolvency. An UNKNOWN
+        counterparty_id (i.e. every real, organic carrier/OTA that isn't in
+        the seed table) is treated CONSERVATIVELY (blocked pending consent),
+        never silently cleared — but that conservative-block is a fail-safe
+        default, NOT a positive fraud finding. In practice this gate only ever
+        actively FIRES a distress signal (BLOCKED/elevated) on the hand-seeded
+        demo ids; it does not (today) detect fraud on an organic booking the
+        way a live solvency feed would. This is a deliberate, documented scope
+        limitation of the current build, not a claim of live fraud coverage.
         """
         if self._fraud_client is None and not self._fraud_url:
             return None
@@ -3588,6 +4129,20 @@ class TravelOrchestrator:
                 "kind": c.get("kind", "transport"),
                 "leg_id": c.get("leg_id"),
             })
+        # BUG3.1 — leg-level counterparty_id (documented/unit-tested at the Critic,
+        # never previously read here). fraud.vet() de-dups on the canonical id
+        # itself, so a leg naming the same id as an existing top-level entry is
+        # harmless to include again.
+        for i, leg in enumerate(trip_request.get("legs") or []):
+            if not isinstance(leg, dict):
+                continue
+            leg_cp_id = leg.get("counterparty_id")
+            if isinstance(leg_cp_id, str) and leg_cp_id.strip():
+                counterparties.append({
+                    "counterparty_id": leg_cp_id,
+                    "kind": leg.get("counterparty_kind") or "hotel",
+                    "leg_id": leg.get("leg_id") or f"leg-{i}",
+                })
         if not counterparties:
             return None  # no counterparty condition in this scenario → pass-through
         payload: dict[str, Any] = {"counterparties": counterparties}
@@ -3797,6 +4352,19 @@ class TravelOrchestrator:
             "premium_cents": assessment.get("premium_cents", 0),
             "premium_money": assessment.get("premium_money"),
             "excluded_perils_summary": assessment.get("excluded_perils_summary"),
+            # #52 item 1 — insurance_agent.assess_coverage() already computes this
+            # (the closed-set default for ANY peril with no matching policy clause
+            # — see CoverageStatus.UNDETERMINED) but it was being DROPPED here
+            # before reaching the caller: the top-level result carried ONLY
+            # excluded_perils_summary, so a peril the policy has NO clause for at
+            # all (e.g. natural_disaster — no COVER/EXCLUDE/SUBLIMIT/CONDITION row
+            # exists for it on either seeded policy) silently vanished from the
+            # response. The user then saw an empty exclusions list and read "no
+            # gaps" when the real coverage status for the very peril that
+            # triggered the premium was UNKNOWN, not clean. Surface it honestly,
+            # matching the same never-silently-drop bar excluded_perils_summary
+            # already meets.
+            "undetermined_perils": assessment.get("undetermined_perils"),
             "peril_set": payload["peril_set"],
             "line_item": premium_li,
         }
@@ -4021,7 +4589,18 @@ class TravelOrchestrator:
         # hotels' nights×rate), so the commit total equals the search total exactly
         # — there is no re-pricing gap for the ceiling to absorb (audit NIT).
         food_budget = int(max_cents) if max_cents is not None else total
-        supper_idem = f"{idempotency_key}-supper"
+        # var-0 fix (same class as _package_digest, task #49): the base
+        # idempotency_key is a digest of the RAW trip request only (no supper
+        # fields), so two calls that differ ONLY in supper selection (city,
+        # diet, item) would otherwise collide on "{idempotency_key}-supper"
+        # against a fresh checkout_id each time -- the merchant's complete_checkout
+        # replay is not bound to checkout_id, so the second, different supper
+        # order gets silently replaced by the first order's booking_ref/total_cents.
+        # Fold the actual chosen line_item into the key so two DIFFERENT supper
+        # selections never collide, while a genuine retry of the SAME selection
+        # still correctly replays.
+        _supper_blob = json.dumps(line_item, sort_keys=True, separators=(",", ":"), default=str)
+        supper_idem = f"{idempotency_key}-supper:{hashlib.sha256(_supper_blob.encode('utf-8')).hexdigest()[:12]}"
 
         check_payload = {
             "user_id": user_id,
@@ -4681,6 +5260,7 @@ class TravelOrchestrator:
                 area_stage_dict=area_stage,
                 avoid_lodging_types=leg.get("avoid_lodging_types"),
                 prefer_lodging_types=leg.get("prefer_lodging_types"),
+                dest_country=leg.get("dest_country"),
             )
             # #budget-tier-fix: drop over-tier candidates (relax-if-empty) so the DP
             # optimises quality WITHIN the tier instead of booking the priciest fit.
@@ -4818,6 +5398,11 @@ class TravelOrchestrator:
         proposals: dict[str, dict | None] = {leg["leg_id"]: None for leg in legs}
         # Map leg_id → leg metadata (city, checkin, checkout, adults)
         leg_meta: dict[str, dict] = {leg["leg_id"]: leg for leg in legs}
+        # #94: leg_meta comes from the Planner skeleton, which does NOT carry
+        # dest_country — backfill it from self._trip_request_legs so
+        # _propose_with_area_ladder's country filter (#93) and
+        # _primary_dest_token's booking_ref token (#94) both see it.
+        self._enrich_leg_meta_dest_country(leg_meta)
 
         # ------------------------------------------------------------------
         # R0d: Use DP-selected hotels as initial proposals
@@ -4918,6 +5503,8 @@ class TravelOrchestrator:
             total_budget_cents=total_budget_cents,
             effective_ceiling=effective_ceiling,
             lodging_budget_cents=lodging_budget_cents,
+            risk_assessment=risk_assessment,
+            gate_fees=gate_fees,
             idempotency_key=idempotency_key,
             negotiation_log=negotiation_log,
             legs=legs,
@@ -4928,6 +5515,7 @@ class TravelOrchestrator:
             area_stage=area_stage,
             consent_tokens=trip_request.get("consent_tokens"),
             persona=(trip_request.get("persona") or "default"),
+            overland_only=bool(trip_request.get("overland_only", False)),
         )
 
         # ------------------------------------------------------------------
@@ -5012,6 +5600,9 @@ class TravelOrchestrator:
         }
         proposals: dict[str, dict | None] = {leg["leg_id"]: None for leg in legs}
         leg_meta: dict[str, dict] = {leg["leg_id"]: leg for leg in legs}
+        # #94: see the DP path's identical call above — the greedy path's
+        # leg_meta comes from the same dest_country-less Planner skeleton.
+        self._enrich_leg_meta_dest_country(leg_meta)
 
         # R1: Initial greedy accommodation proposals
         for leg in legs:
@@ -5043,6 +5634,8 @@ class TravelOrchestrator:
             total_budget_cents=total_budget_cents,
             effective_ceiling=effective_ceiling,
             lodging_budget_cents=lodging_budget_cents,
+            risk_assessment=risk_assessment,
+            gate_fees=gate_fees,
             idempotency_key=idempotency_key,
             negotiation_log=negotiation_log,
             legs=legs,
@@ -5053,6 +5646,7 @@ class TravelOrchestrator:
             area_stage=area_stage,
             consent_tokens=trip_request.get("consent_tokens"),
             persona=(trip_request.get("persona") or "default"),
+            overland_only=bool(trip_request.get("overland_only", False)),
         )
 
     # ------------------------------------------------------------------
@@ -5301,6 +5895,79 @@ class TravelOrchestrator:
             }
 
     # ------------------------------------------------------------------
+    # #112 fix: recover legs abandoned mid re-plan pass.
+    # ------------------------------------------------------------------
+
+    def _retry_abandoned_legs(
+        self,
+        *,
+        proposals: dict[str, Any],
+        abandoned_lids: list[str],
+        eff_ceiling: int,
+        leg_meta: dict[str, dict],
+        target_areas: dict[str, list[str]],
+        area_stage: dict[str, int],
+        ceilings: dict[str, int],
+        legs: list,
+    ) -> bool:
+        """
+        #112 fix (non-monotonic budget cliff): the tighten-priciest-leg re-plan
+        loop above tries legs PRICIEST FIRST and `break`s on the first one that
+        successfully re-fits at a tightened ceiling. Any OTHER leg that was
+        tried-and-failed (set to no_fit / None) EARLIER in that same pass is
+        left permanently abandoned — even though the leg that *did* succeed
+        just shrank, which frees up fresh ceiling headroom for the abandoned
+        leg(s). Without this retry, the very next thing that runs is the
+        ALL-OR-NONE check at the top of the round loop, which sees the
+        abandoned leg's `None` proposal and returns cannot_satisfy immediately
+        — often well short of MAX_ROUNDS and with real headroom sitting
+        unused (see the task's negotiation_log trace: leg squeezed to an
+        unfittable ceiling using a STALE other-legs total, while the
+        just-tightened leg's real (lower) cost would have freed enough room).
+
+        Recomputes each abandoned leg's ceiling off the CURRENT `proposals`
+        (which already reflects the just-tightened leg's real, lower cost)
+        rather than the stale pre-pass snapshot, and retries
+        `_propose_with_area_ladder` against that fresh headroom. Mutates
+        `proposals` / `ceilings` in place. Returns True if at least one
+        previously-abandoned leg now fits.
+        """
+        recovered = False
+        for lid in abandoned_lids:
+            if proposals.get(lid) is not None:
+                continue  # already recovered by an earlier iteration of this retry pass
+            other_costs = sum(
+                p["total_cents"] for other_lid, p in proposals.items()
+                if other_lid != lid and p is not None
+            )
+            new_max = eff_ceiling - other_costs
+            if new_max <= 0:
+                new_max = max(1, math.floor(eff_ceiling / max(len(legs), 1)))
+            ceilings[lid] = new_max
+            acc_result = self._propose_with_area_ladder(
+                leg_meta=leg_meta,
+                target_areas=target_areas,
+                area_stage=area_stage,
+                leg_id=lid,
+                max_cents=new_max,
+            )
+            if acc_result.get("fit") == "ok":
+                proposals[lid] = acc_result["proposal"]
+                logger.info(
+                    "orchestrator: #112 recovered abandoned leg=%s at freed "
+                    "ceiling=%d¢ (headroom from a sibling leg's successful tighten)",
+                    lid, new_max,
+                )
+                recovered = True
+            else:
+                logger.info(
+                    "orchestrator: #112 retry did not recover abandoned leg=%s "
+                    "at freed ceiling=%d¢ — still no_fit",
+                    lid, new_max,
+                )
+        return recovered
+
+    # ------------------------------------------------------------------
     # Shared: negotiation rounds (Budget veto + re-plan + Critic + Transport)
     # ------------------------------------------------------------------
 
@@ -5320,7 +5987,10 @@ class TravelOrchestrator:
         area_stage: dict[str, int],
         consent_tokens: dict | None = None,
         lodging_budget_cents: int | None = None,
+        risk_assessment: dict | None = None,
+        gate_fees: list[dict] | None = None,
         persona: str = "default",
+        overland_only: bool = False,
     ) -> dict:
         """
         Shared Budget veto + re-plan loop (used by both DP and greedy paths).
@@ -5349,6 +6019,25 @@ class TravelOrchestrator:
         budget.enforce path (buyer_consent=True in one call).  This happens when
         the budget.check call raises RuntimeError about the skill not found.
         """
+        # Bug-2 fix #3 (insurance envelope false declines): `lodging_budget_cents`
+        # (as passed in) reserved its insurance-premium component priced at
+        # ceiling_cents=total_budget_cents (the user's FULL STATED BUDGET, an
+        # upper bound taken before any proposal existed — see #72's docstring on
+        # _estimate_insurance_premium_cents). That upper bound is correct but can
+        # over-reserve substantially once REAL proposals exist this round,
+        # artificially shrinking the ceiling sent to the merchant CHECK below what
+        # the trip can actually afford — a false near-miss decline ("you're $3
+        # short") even though trip + real premium genuinely fits. Recompute the
+        # premium EVERY round off the REAL now-known package_total (this round's
+        # proposed lodging cost) instead of the stale ceiling estimate; premium is
+        # monotonic in trip cost and package_total <= total_budget_cents, so the
+        # recomputed reserve is always <= the original (never loosens past a
+        # genuinely-affordable total). No peril / no Risk agent → premium stays 0
+        # both ways → byte-identical (var-0) for the common case.
+        _gate_fee_total = sum(
+            int((li.get("money") or {}).get("usd_cents", 0) or 0)
+            for li in (gate_fees or [])
+        )
         for round_num in range(MAX_ROUNDS + 1):
             # Legs with proposals contribute to the package
             fitted_legs = {lid: p for lid, p in proposals.items() if p is not None}
@@ -5419,6 +6108,23 @@ class TravelOrchestrator:
             # ------------------------------------------------------------------
             use_two_phase = True
             check_transient_error = False  # L1 — set True only on a caught transient exc below
+            # Bug-2 fix #3: re-price the insurance-premium reserve off THIS round's
+            # real package_total (the real trip cost) instead of the stale
+            # ceiling-priced estimate baked into `lodging_budget_cents` — see the
+            # fix-#3 comment above the round loop. `package_total` (lodging only,
+            # NO fees folded in) is deliberately the SAME basis _apply_insurance
+            # uses post-commit (insured_cost = result["total_cents"], which never
+            # includes fee_line_items — see _inject_fees), so this pre-commit
+            # estimate and the real post-commit premium agree.
+            if lodging_budget_cents is not None:
+                _real_premium_est = self._estimate_insurance_premium_cents(
+                    risk_assessment, package_total
+                )
+                _lodging_budget_for_check = max(
+                    1, total_budget_cents - _gate_fee_total - _real_premium_est
+                )
+            else:
+                _lodging_budget_for_check = total_budget_cents
             check_payload = {
                 "user_id": user_id,
                 "line_items": line_items,
@@ -5427,10 +6133,10 @@ class TravelOrchestrator:
                 # upper-bound insurance premium), so a trip that busts budget once fees are added
                 # is 403'd PRE-commit (never booked → no stranded reservation). Falls back to the
                 # full budget for any direct caller that doesn't pass it (var-0 / back-compat).
-                "total_budget_cents": (
-                    lodging_budget_cents if lodging_budget_cents is not None
-                    else total_budget_cents
-                ),  # SEV-1b
+                # Bug-2 fix #3: `_lodging_budget_for_check` (recomputed every round off
+                # the REAL package_total) replaces the stale, ceiling-priced
+                # `lodging_budget_cents` here — see comment above.
+                "total_budget_cents": _lodging_budget_for_check,  # SEV-1b
                 "idempotency_key": idempotency_key,
                 # SIMULATED prepaid wallet binding — the merchant persists this on the
                 # session at create time so the commit-time debit / cancel-time credit
@@ -5549,6 +6255,15 @@ class TravelOrchestrator:
                         **({"unverified_lodging": True,
                             "note": self._unverified_lodging[str(prop.get("hotel_id"))]}
                            if str(prop.get("hotel_id")) in self._unverified_lodging else {}),
+                        # BUG3.2 (2026-07 adversarial audit, defense-in-depth): carry a
+                        # leg-level counterparty_id (now threaded through by the Planner,
+                        # see planner_agent.py) all the way into critic_payload["legs"]
+                        # so the Critic's Gate 6b commit-time re-check — which reads
+                        # leg.get("counterparty_id") — actually sees it. Without this the
+                        # field was dropped here even after the Planner fix, and the
+                        # Critic's re-check could never fire on it.
+                        **({"counterparty_id": lm["counterparty_id"]}
+                           if lm.get("counterparty_id") else {}),
                     })
 
                 # --- M3b: Transport feasibility gate ---
@@ -5558,7 +6273,7 @@ class TravelOrchestrator:
                 except Exception:  # noqa: BLE001
                     pass
                 try:
-                    transport_result = self._call_transport(candidate_legs, persona)
+                    transport_result = self._call_transport(candidate_legs, persona, overland_only)
                 except Exception as exc:  # noqa: BLE001
                     # M3 — a single Transport failure (network/timeout/failed task)
                     # must NOT abort the whole negotiation as a raw server_error
@@ -5676,7 +6391,7 @@ class TravelOrchestrator:
                                 )
                                 candidate_legs = reordered_legs
                                 try:
-                                    transport_result = self._call_transport(candidate_legs, persona)
+                                    transport_result = self._call_transport(candidate_legs, persona, overland_only)
                                 except Exception as exc:  # noqa: BLE001
                                     # M3 — same guard as the initial call above.
                                     log_entry["action"] = "transport_error"
@@ -5767,11 +6482,20 @@ class TravelOrchestrator:
                                     src_leg = self._trip_request_legs[idx] or {}
                             except (ValueError, IndexError):
                                 src_leg = {}
-                        # #70: iso2 from the city map, else the leg's EXPLICIT dest_country. A
-                        # structured trip carries dest_country; dropping it produced ":city"
-                        # keys (e.g. ":cebu") that missed the POI catalog -> empty day-plan.
-                        iso2 = (CITY_TO_ISO2.get(city.strip().lower())
-                                or (src_leg.get("dest_country") or "").strip().upper())
+                        # #70/#87: the leg's EXPLICIT dest_country is AUTHORITATIVE — it was
+                        # parsed from the request the traveller actually made — and must win
+                        # whenever present. CITY_TO_ISO2 is a catalog-derived GUESS from a bare
+                        # city name and is only consulted as a fallback when dest_country is
+                        # absent/unresolved (the #70 case: a structured trip that dropped
+                        # dest_country produced ":city" keys, e.g. ":cebu", that missed the POI
+                        # catalog -> empty day-plan). Getting this priority backwards is a
+                        # money-path correctness bug: CITY_TO_ISO2['victoria'] == 'HK' (a Hong
+                        # Kong district) silently overrode an explicit dest_country='SC'
+                        # (Seychelles) request and booked a REAL Hong Kong hotel instead — see
+                        # #87. dest_country may be "" (absent) or a valid ISO2; only a
+                        # non-empty string counts as "present".
+                        _explicit_dest_country = (src_leg.get("dest_country") or "").strip().upper()
+                        iso2 = _explicit_dest_country or CITY_TO_ISO2.get(city.strip().lower())
                         activity_legs.append({
                             "leg_id": lid,
                             "city": city,
@@ -5789,10 +6513,30 @@ class TravelOrchestrator:
                             # apply kid-appropriate signals (family dining bias + note).
                             "children": src_leg.get("children"),
                             "bad_weather_days": src_leg.get("bad_weather_days"),
+                            # #region-fix (2026-07 adversarial audit): thread Risk's
+                            # already-resolved region through so the day-planner's
+                            # bad-weather contingency (derive_bad_weather_days) can
+                            # actually auto-derive bad_weather_days when the caller
+                            # didn't supply them explicitly above. See
+                            # self._risk_region_by_leg, set in negotiate(). Defensive
+                            # getattr (mirrors self._trip_request_legs's fallback
+                            # elsewhere): a caller that invokes _negotiate_dp/
+                            # _negotiate_greedy directly (bypassing negotiate()'s
+                            # R0a-risk step, e.g. some unit tests) never set it —
+                            # None is a legitimate "unresolved region" value the
+                            # day-planner already treats conservatively (no bad-
+                            # weather derivation), same as before this fix existed.
+                            "region": getattr(self, "_risk_region_by_leg", {}).get(lid),
                             # Travel-day reservation: minutes the arrival day loses to inter-city
                             # transit (flight-only airport transfer); 0 for the origin leg.
                             "arrival_transport_minutes": _arrival_transport_minutes(
                                 leg, lid, city, arrival_minutes_by_leg, arrival_mode_by_leg),
+                            # #52 item 8 — an active HIGH/AVOID water-related hazard
+                            # (cyclone/flood) for THIS leg, so the day-planner never
+                            # recommends swimming/water sports in the same response
+                            # that separately warns they may be curtailed.
+                            "water_activity_hazard": self._leg_water_hazard(
+                                risk_assessment, lid),
                         })
                     try:
                         self._tracer("agent_started", "DayPlanner",
@@ -5924,10 +6668,12 @@ class TravelOrchestrator:
                         )
                         # L4 — thread the already-known priced package total (see
                         # _do_commit's `total_cents` docstring paragraph).
+                        # var-0 fix (task #49 re-plan): fold the FINAL package into
+                        # the commit idempotency key (see _package_digest docstring).
                         budget_result = self._do_commit(
                             user_id=user_id,
                             checkout_id=budget_result.get("checkout_id", ""),
-                            idempotency_key=idempotency_key,
+                            idempotency_key=f"{idempotency_key}:{_package_digest(proposals)}",
                             total_cents=package_total,
                         )
                         if budget_result.get("decision") == "commit_failed":
@@ -5987,6 +6733,7 @@ class TravelOrchestrator:
                                 ),
                                 closest_total=package_total,
                                 negotiation_log=negotiation_log,
+                                day_plan_preview=day_plan_result,
                             )
                             result["idempotency_key"] = idempotency_key
                             result["checkout_id"] = budget_result.get("checkout_id", "")
@@ -5994,19 +6741,31 @@ class TravelOrchestrator:
                         if budget_result.get("decision") != "accept":
                             # Commit-time veto (merchant re-priced) → treat as veto
                             decision = budget_result.get("decision", "veto")
+                            veto_reason = budget_result.get("veto_reason", "unknown")
                             log_entry["action"] = "veto_received"  # commit-time veto treated as veto
                             log_entry["budget_result"] = budget_result
                             negotiation_log.append(log_entry)
                             logger.warning(
                                 "orchestrator: COMMIT-TIME %s round=%d reason=%s",
-                                decision.upper(), round_num,
-                                budget_result.get("veto_reason", ""),
+                                decision.upper(), round_num, veto_reason,
                             )
                             # Treat commit-time veto the same as a check-time veto
                             # (fall through to the veto re-plan block below).
                             # We set decision and re-enter the veto handling path.
                             # Since we've already appended log_entry, continue to next round.
-                            merchant_ceiling = budget_result.get("budget_ceiling_cents")
+                            # Bug-2 fix #1 (core clamp): price_exceeds_hard_max vetoes
+                            # populate hard_max_cents, NOT budget_ceiling_cents (see
+                            # ucp-merchant/checkout.go) — reading only
+                            # budget_ceiling_cents left effective_ceiling untightened
+                            # for hard-max vetoes, so the re-plan loop kept re-pricing
+                            # against the OLD too-high ceiling and exhausted MAX_ROUNDS
+                            # into a false decline (books-at-low / declines-at-high).
+                            # Fall back to hard_max_cents so BOTH veto shapes clamp to
+                            # the real merchant-enforced ceiling.
+                            merchant_ceiling = (
+                                budget_result.get("budget_ceiling_cents")
+                                or budget_result.get("hard_max_cents")
+                            )
                             if merchant_ceiling and merchant_ceiling < effective_ceiling:
                                 effective_ceiling = merchant_ceiling
                             # Re-plan: tighten the priciest leg (same as veto path)
@@ -6016,6 +6775,7 @@ class TravelOrchestrator:
                                 reverse=True,
                             )
                             re_planned = False
+                            abandoned_lids: list[str] = []
                             for target_lid, target_prop in fitted_by_cost:
                                 other_costs = sum(
                                     p["total_cents"]
@@ -6041,21 +6801,52 @@ class TravelOrchestrator:
                                     break
                                 else:
                                     proposals[target_lid] = None
+                                    abandoned_lids.append(target_lid)
+                            # #112 fix: a sibling leg's successful tighten (above) just
+                            # freed real ceiling headroom (its cost dropped) — retry any
+                            # leg abandoned earlier in THIS pass against that fresh
+                            # headroom before falling through to the all-or-none check.
+                            if re_planned and abandoned_lids:
+                                self._retry_abandoned_legs(
+                                    proposals=proposals,
+                                    abandoned_lids=abandoned_lids,
+                                    eff_ceiling=effective_ceiling,
+                                    leg_meta=leg_meta,
+                                    target_areas=target_areas,
+                                    area_stage=area_stage,
+                                    ceilings=ceilings,
+                                    legs=legs,
+                                )
+                            # Bug-2 fix #2: surface the REAL merchant decline reason +
+                            # amounts (previously discarded in favor of a generic
+                            # "Cannot re-plan" message) — the same veto_reason /
+                            # total_cents / ceiling values were already sitting in
+                            # budget_result, just never reaching the caller.
+                            _veto_detail = (
+                                f" Merchant declined ({veto_reason}): priced at "
+                                f"${budget_result.get('total_cents', 0) / 100:,.2f}, "
+                                f"ceiling ${(merchant_ceiling or 0) / 100:,.2f}."
+                            )
                             if not re_planned:
                                 if round_num >= MAX_ROUNDS:
                                     return self._cannot_satisfy_result(
                                         reason=(
                                             f"Commit-time veto after {MAX_ROUNDS} rounds. "
-                                            f"Cannot re-plan any leg to fit."
+                                            f"Cannot re-plan any leg to fit." + _veto_detail
                                         ),
                                         closest_total=package_total,
                                         negotiation_log=negotiation_log,
+                                        day_plan_preview=day_plan_result,
                                     )
                             if round_num >= MAX_ROUNDS:
                                 return self._cannot_satisfy_result(
-                                    reason="Max rounds exceeded without convergence (commit-time veto).",
+                                    reason=(
+                                        "Max rounds exceeded without convergence "
+                                        "(commit-time veto)." + _veto_detail
+                                    ),
                                     closest_total=package_total,
                                     negotiation_log=negotiation_log,
+                                    day_plan_preview=day_plan_result,
                                 )
                             continue
 
@@ -6129,10 +6920,12 @@ class TravelOrchestrator:
                         )
                         # L4 — thread the already-known priced package total (see
                         # _do_commit's `total_cents` docstring paragraph).
+                        # var-0 fix (task #49 re-plan): fold the FINAL package into
+                        # the commit idempotency key (see _package_digest docstring).
                         final_budget_result = self._do_commit(
                             user_id=user_id,
                             checkout_id=budget_result.get("checkout_id", ""),
-                            idempotency_key=idempotency_key,
+                            idempotency_key=f"{idempotency_key}:{_package_digest(proposals)}",
                             total_cents=package_total,
                         )
                         if final_budget_result.get("decision") == "commit_failed":
@@ -6190,6 +6983,7 @@ class TravelOrchestrator:
                                 ),
                                 closest_total=package_total,
                                 negotiation_log=negotiation_log,
+                                day_plan_preview=day_plan_result,
                             )
                             result["idempotency_key"] = idempotency_key
                             result["checkout_id"] = final_budget_result.get("checkout_id", "")
@@ -6198,16 +6992,23 @@ class TravelOrchestrator:
                             # Commit-time veto (merchant re-priced between check and commit).
                             # Treat same as a budget veto — will trigger re-plan.
                             commit_decision = final_budget_result.get("decision", "veto")
+                            veto_reason = final_budget_result.get("veto_reason", "unknown")
                             log_entry["action"] = f"commit_time_{commit_decision}"
                             log_entry["budget_result"] = final_budget_result
                             negotiation_log.append(log_entry)
                             logger.warning(
                                 "orchestrator: COMMIT-TIME %s (after Critic verified) "
                                 "round=%d reason=%s — will re-plan",
-                                commit_decision.upper(), round_num,
-                                final_budget_result.get("veto_reason", ""),
+                                commit_decision.upper(), round_num, veto_reason,
                             )
-                            merchant_ceiling = final_budget_result.get("budget_ceiling_cents")
+                            # Bug-2 fix #1 (core clamp) — see the mirror-image comment
+                            # in the no-Critic branch above: price_exceeds_hard_max
+                            # vetoes only populate hard_max_cents, not
+                            # budget_ceiling_cents.
+                            merchant_ceiling = (
+                                final_budget_result.get("budget_ceiling_cents")
+                                or final_budget_result.get("hard_max_cents")
+                            )
                             if merchant_ceiling and merchant_ceiling < effective_ceiling:
                                 effective_ceiling = merchant_ceiling
                             fitted_by_cost = sorted(
@@ -6216,6 +7017,7 @@ class TravelOrchestrator:
                                 reverse=True,
                             )
                             re_planned = False
+                            abandoned_lids: list[str] = []
                             for target_lid, target_prop in fitted_by_cost:
                                 other_costs = sum(
                                     p["total_cents"]
@@ -6241,14 +7043,36 @@ class TravelOrchestrator:
                                     break
                                 else:
                                     proposals[target_lid] = None
+                                    abandoned_lids.append(target_lid)
+                            # #112 fix: see the mirror-image comment in the no-Critic
+                            # branch above — retry any leg abandoned earlier in THIS
+                            # pass against the headroom the successful tighten just
+                            # freed, before falling through to all-or-none/cannot_satisfy.
+                            if re_planned and abandoned_lids:
+                                self._retry_abandoned_legs(
+                                    proposals=proposals,
+                                    abandoned_lids=abandoned_lids,
+                                    eff_ceiling=effective_ceiling,
+                                    leg_meta=leg_meta,
+                                    target_areas=target_areas,
+                                    area_stage=area_stage,
+                                    ceilings=ceilings,
+                                    legs=legs,
+                                )
                             if not re_planned or round_num >= MAX_ROUNDS:
+                                # Bug-2 fix #2 — surface the real merchant reason +
+                                # amounts instead of a generic "Cannot re-plan".
                                 return self._cannot_satisfy_result(
                                     reason=(
                                         f"Commit-time veto after Critic verified, "
-                                        f"round {round_num}. Cannot re-plan."
+                                        f"round {round_num}. Cannot re-plan. "
+                                        f"Merchant declined ({veto_reason}): priced at "
+                                        f"${final_budget_result.get('total_cents', 0) / 100:,.2f}, "
+                                        f"ceiling ${(merchant_ceiling or 0) / 100:,.2f}."
                                     ),
                                     closest_total=package_total,
                                     negotiation_log=negotiation_log,
+                                    day_plan_preview=day_plan_result,
                                 )
                             continue
 
@@ -6293,10 +7117,7 @@ class TravelOrchestrator:
                     return self._cannot_satisfy_result(
                         reason=(
                             f"Critic rejected itinerary after {MAX_ROUNDS} rounds: "
-                            + "; ".join(
-                                f"{v['code']} ({v.get('leg_id', 'pkg')}): {v['detail'][:80]}"
-                                for v in violations
-                            )
+                            + "; ".join(_fmt_violation(v) for v in violations)
                         ),
                         closest_total=package_total,
                         negotiation_log=negotiation_log,
@@ -6344,6 +7165,7 @@ class TravelOrchestrator:
                             key=lambda kv: kv[1]["total_cents"],
                             reverse=True,
                         )
+                        abandoned_lids: list[str] = []
                         for target_lid, target_prop in fitted_by_cost:
                             other_costs = sum(
                                 p["total_cents"]
@@ -6369,16 +7191,27 @@ class TravelOrchestrator:
                                 break
                             else:
                                 proposals[target_lid] = None
+                                abandoned_lids.append(target_lid)
+                        # #112 fix: retry any leg abandoned earlier in THIS pass
+                        # against the headroom the successful tighten just freed.
+                        if re_planned_critic and abandoned_lids:
+                            self._retry_abandoned_legs(
+                                proposals=proposals,
+                                abandoned_lids=abandoned_lids,
+                                eff_ceiling=new_eff_ceiling,
+                                leg_meta=leg_meta,
+                                target_areas=target_areas,
+                                area_stage=area_stage,
+                                ceilings=ceilings,
+                                legs=legs,
+                            )
 
                 if not re_planned_critic:
                     return self._cannot_satisfy_result(
                         reason=(
                             "Critic rejected itinerary and no re-plan found. "
                             "Violations: "
-                            + "; ".join(
-                                f"{v['code']} ({v.get('leg_id', 'pkg')}): {v['detail'][:80]}"
-                                for v in violations
-                            )
+                            + "; ".join(_fmt_violation(v) for v in violations)
                         ),
                         closest_total=package_total,
                         negotiation_log=negotiation_log,
@@ -6425,6 +7258,7 @@ class TravelOrchestrator:
                     reverse=True,
                 )
                 re_planned = False
+                abandoned_lids: list[str] = []
                 for target_lid, target_prop in fitted_by_cost:
                     other_costs = sum(
                         p["total_cents"]
@@ -6463,10 +7297,26 @@ class TravelOrchestrator:
                         break
                     else:
                         proposals[target_lid] = None
+                        abandoned_lids.append(target_lid)
                         logger.info(
                             "orchestrator: re-plan leg=%s no_fit at new_ceiling=%d¢",
                             target_lid, new_max,
                         )
+
+                # #112 fix: retry any leg abandoned earlier in THIS pass against
+                # the headroom the successful tighten just freed, before falling
+                # through to the exhausted-re-plan cannot_satisfy below.
+                if re_planned and abandoned_lids:
+                    self._retry_abandoned_legs(
+                        proposals=proposals,
+                        abandoned_lids=abandoned_lids,
+                        eff_ceiling=effective_ceiling,
+                        leg_meta=leg_meta,
+                        target_areas=target_areas,
+                        area_stage=area_stage,
+                        ceilings=ceilings,
+                        legs=legs,
+                    )
 
                 if not re_planned:
                     # #72: when an enforced-fee envelope was reserved, the lodging ceiling is
@@ -6874,6 +7724,7 @@ class TravelOrchestrator:
         critic_result: dict | None = None,
         budget_shortfall_cents: int | None = None,
         min_feasible_total_cents: int | None = None,
+        day_plan_preview: dict | None = None,
     ) -> dict[str, Any]:
         result: dict[str, Any] = {
             "outcome": "cannot_satisfy",
@@ -6883,6 +7734,18 @@ class TravelOrchestrator:
         }
         if critic_result is not None:
             result["critic_violations"] = critic_result.get("violations", [])
+        # Commit-time budget-veto decline (bug-2 cluster, fix #4): the day-by-day
+        # activity/meal plan for this round was already fully computed before the
+        # merchant's commit-time veto killed the trip — long segmented itineraries
+        # (which hit hard-max/re-plan caps most often) hit this exact case. Rather
+        # than throwing that work away on a bare rejection, attach it as a
+        # non-authoritative preview. ADDITIVE ONLY / caller-scoped: only the
+        # commit-time-veto decline call sites pass this kwarg — every other
+        # cannot_satisfy call site is byte-identical (kwarg defaults to None).
+        if day_plan_preview is not None:
+            leg_plans = day_plan_preview.get("leg_plans", [])
+            if leg_plans:
+                result["day_plans_preview"] = leg_plans
         # Budget-guidance addition: only when BOTH fields are present AND shortfall > 0
         # (0 shortfall = budget covers the cheapest plan, no top-up needed).
         # ADDITIVE ONLY — all existing callers pass neither kwarg → byte-identical.

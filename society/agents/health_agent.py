@@ -122,6 +122,87 @@ _REQUIREMENT_KINDS = frozenset({
 })
 
 
+# ===========================================================================
+# #52 — TRANSIT-BASED YELLOW-FEVER MANDATE (origin-conditional REQUIRED_FOR_ENTRY).
+# ===========================================================================
+# Several destinations' yellow-fever entry-certificate mandate is NOT universal — it
+# is CONDITIONAL on the traveler arriving from (or transiting >=12h through) a
+# yellow-fever-TRANSMISSION-RISK country (their own seeded `note` already says so:
+# "Required ONLY if arriving from or transiting..."). Before this fix, `kind` was
+# unconditionally REQUIRED_FOR_ENTRY regardless of the traveler's actual origin —
+# so EVERY traveler (including a direct US/UK/EU flight) was charged/gated on it
+# (over-warn: e.g. South Africa billing $111 to a direct US traveler), AND the
+# inverse gap — arriving at a NON-origin-conditional destination (no seeded YF row
+# at all, e.g. India) FROM a YF-endemic origin (e.g. Kenya) — went completely
+# unmodeled (under-warn: a false-confident clean verdict).
+#
+# `origin_conditional=True` on a REQUIRED_FOR_ENTRY vaccine row (set on the rows
+# below whose own note already states the origin condition) marks that the mandate
+# must be evaluated against `arriving_from_country` (see assess_destination /
+# assess()) rather than applied unconditionally. Rows WITHOUT this flag (e.g.
+# Ethiopia, Kenya, Uganda, Cote d'Ivoire, Angola, Ghana, Cameroon — genuinely
+# YF-endemic destinations that mandate the cert for ALL entrants) are unaffected.
+#
+# `_YF_ENDEMIC_ORIGIN_COUNTRIES` is deliberately SELF-CONSISTENT with this seed
+# (derived from the destinations THIS seed already treats as unconditionally
+# YF-endemic) plus DRC — explicitly named as an endemic trigger in the Ecuador/
+# Zimbabwe conditional notes above — rather than a hand-typed full WHO list, so it
+# never asserts a fact this file doesn't already source elsewhere.
+#
+# KNOWN LIMITATION (documented, not silently swept under the rug — see item #4 of
+# the #52 audit): (a) this only fires BETWEEN legs of the SAME trip (leg i's
+# "arriving_from_country" = leg i-1's resolved dest_country) — the traveler's TRUE
+# origin/home country before leg 0 is not threaded to Health at all today (no such
+# field reaches `_run_health_gate` from the orchestrator), so a single-leg trip
+# FROM a YF-endemic home country is still not caught; (b) the missing-YF-row gap
+# (destination has no seeded yellow_fever entry at all) is fixed here ONLY for the
+# audit's cited India example (a real, WHO/Govt-of-India-documented requirement),
+# not backfilled across the full destination catalog — a comprehensive backfill is
+# a larger, separately-scoped data-modeling effort.
+_YF_ENDEMIC_ORIGIN_COUNTRIES: frozenset[str] = frozenset({
+    "ET", "KE", "CI", "UG", "AO", "GH", "CM",  # this seed's own universal YF-endemic destinations
+    "CD",  # DRC — explicitly named in the Ecuador/Zimbabwe conditional notes above
+})
+
+
+def _yf_origin_condition(
+    vrow: dict[str, Any], arriving_from_country: str | None,
+) -> tuple[bool, str | None]:
+    """
+    Whether an `origin_conditional` REQUIRED_FOR_ENTRY vaccine row's mandate
+    genuinely applies to THIS traveler, given the immediate origin of this leg.
+
+    Non-origin_conditional rows always apply (universal mandate; unaffected).
+    origin_conditional rows:
+      - unknown origin  -> applies=True (fail-conservative: never silently drop an
+        unverified mandate), honest note that origin is unverified.
+      - known + YF-endemic origin -> applies=True, note cites the trigger.
+      - known + non-endemic origin -> applies=False (the honest downgrade that
+        stops over-charging/over-warning a direct traveler), note explains why.
+    Returns (applies, note_or_None). PURE + deterministic.
+    """
+    if not vrow.get("origin_conditional"):
+        return True, None
+    if not arriving_from_country:
+        return True, (
+            "Origin-conditional yellow-fever mandate: this trip does not tell "
+            "Health the traveler's immediately preceding origin, so the mandate "
+            "is conservatively treated as REQUIRED — confirm your actual travel/"
+            "transit history against the destination's real entry rules."
+        )
+    origin = arriving_from_country.strip().upper()
+    if origin in _YF_ENDEMIC_ORIGIN_COUNTRIES:
+        return True, (
+            f"Triggered: this leg is reached from/via {origin}, a yellow-fever-"
+            f"transmission-risk country on this trip's own itinerary."
+        )
+    return False, (
+        f"Not required for this traveler: this leg is reached directly from "
+        f"{origin}, which this trip does not treat as yellow-fever-transmission-"
+        f"risk — the entry-certificate mandate does not apply."
+    )
+
+
 class GateVerdict:
     """The closed set of entry-health gate outcomes for the whole trip.
 
@@ -611,6 +692,7 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
                 "vaccine": "yellow_fever",
                 "label": "Yellow Fever (entry certificate)",
                 "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
                 "cost_cents": 15000, "currency": "SGD",
                 "dosing_lead_days": 10,
                 "validity_years": 10,
@@ -697,6 +779,29 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
         "medical_access_tier": "B",
         "evacuation_recommended": False,
         "vaccines": [
+            {
+                # #52 — India requires a yellow-fever certificate from travelers
+                # arriving from/transiting a YF-transmission-risk country (real,
+                # WHO/Govt-of-India-documented IHR requirement) — this row was
+                # entirely absent before the #52 audit, so a transit itinerary like
+                # Kenya->India got a confident clean health verdict with no YF
+                # mandate at all. origin_conditional (see _yf_origin_condition):
+                # applies when arriving_from_country is YF-endemic; a direct
+                # traveler with no such transit is correctly NOT charged/gated.
+                "vaccine": "yellow_fever",
+                "label": "Yellow Fever (entry certificate)",
+                "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
+                "cost_cents": 15000, "currency": "SGD",
+                "dosing_lead_days": 10,
+                "validity_years": 10,
+                "note": (
+                    "Required ONLY if arriving from or transiting a country with "
+                    "yellow fever transmission risk (e.g. most of sub-Saharan "
+                    "Africa, parts of South America) — NOT required for direct "
+                    "travel from a non-endemic origin."
+                ),
+            },
             {
                 "vaccine": "hepatitis_a",
                 "label": "Hepatitis A (2-dose series)",
@@ -836,6 +941,7 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
                 "vaccine": "yellow_fever",
                 "label": "Yellow Fever (entry certificate)",
                 "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
                 "cost_cents": 15000, "currency": "SGD",
                 "dosing_lead_days": 10,
                 "validity_years": 10,
@@ -1126,6 +1232,7 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
                 "vaccine": "yellow_fever",
                 "label": "Yellow Fever (entry certificate)",
                 "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
                 "cost_cents": 15000, "currency": "SGD",
                 "dosing_lead_days": 10,
                 "validity_years": 10,
@@ -1856,6 +1963,7 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
                 "vaccine": "yellow_fever",
                 "label": "Yellow Fever (entry certificate)",
                 "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
                 "cost_cents": 15000,
                 "currency": "SGD",
                 "dosing_lead_days": 10,
@@ -1944,6 +2052,7 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
                 "vaccine": "yellow_fever",
                 "label": "Yellow Fever (entry certificate)",
                 "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
                 "cost_cents": 15000,
                 "currency": "SGD",
                 "dosing_lead_days": 10,
@@ -2003,6 +2112,7 @@ _HEALTH_SLATES: dict[str, dict[str, Any]] = {
                 "vaccine": "yellow_fever",
                 "label": "Yellow Fever (entry certificate)",
                 "kind": RequirementKind.REQUIRED_FOR_ENTRY,
+                "origin_conditional": True,  # #52 — see _yf_origin_condition
                 "cost_cents": 15000,
                 "currency": "SGD",
                 "dosing_lead_days": 10,
@@ -2952,6 +3062,13 @@ _COUNTRY_ISO2_TO_SLATE_KEY: dict[str, str] = {
     "DO": "dominican-republic",
 }
 
+# #52 — the reverse of the map above (slate key -> ISO2), used ONLY to resolve a
+# leg's OWN destination ISO2 (from its place_key) so the NEXT leg can be told what
+# it is "arriving from" for transit-based mandates (see _yf_origin_condition /
+# assess()'s prev_dest_iso2 tracking). Where two ISO2s share a slate key (there are
+# none in the map above), the last-inserted one wins — deterministic, dict-order.
+_SLATE_KEY_TO_ISO2: dict[str, str] = {v: k for k, v in _COUNTRY_ISO2_TO_SLATE_KEY.items()}
+
 _COUNTRY_NAME_TO_SLATE_KEY: dict[str, str] = {
     "ethiopia": "ethiopia",
     "kenya": "kenya",
@@ -3013,29 +3130,40 @@ _COUNTRY_NAME_TO_SLATE_KEY: dict[str, str] = {
 
 def _build_city_to_slate_key() -> dict[str, str]:
     """
-    Build a deterministic city (lowercase canonical) → slate key map from the catalog,
-    using the country-name fallback tables above. Loaded once at module init.
+    Build a deterministic city (lowercase canonical) → slate key map, COMPOSED from
+    intent_parser.CITY_TO_ISO2 (the SAME city→country resolution used to set each
+    leg's dest_country) and this module's own ISO2→slate-key table
+    (_COUNTRY_ISO2_TO_SLATE_KEY). Loaded once at module init.
+
+    #109: this used to walk catalog.json independently (city → country-NAME →
+    slate key via _COUNTRY_NAME_TO_SLATE_KEY), a second, uncoordinated guess that
+    could silently disagree with dest_country on a city-name collision. Worse: it
+    additionally SKIPPED a city's true first-catalog-row country whenever that
+    country had no _COUNTRY_NAME_TO_SLATE_KEY entry (e.g. "united states" is not
+    seeded — no CDC advisory needed), and kept scanning to a LATER, unrelated
+    country that did have a slate. Confirmed live: "Salem"'s first catalog row is
+    United States, but since the US has no seeded slate, the old walk fell through
+    to a later "Salem, India" row and served India's CDC slate (9 vaccines,
+    $828.80 in fabricated line items) to a domestic US traveler.
+    Composing through CITY_TO_ISO2 instead reuses the exact city→country winner
+    already used to set dest_country, so this fallback map can never disagree with
+    it — and a city whose (correctly resolved) country has no slate now honestly
+    yields no mapping (→ BLOCK_UNKNOWN_SLATE_CONSERVATIVE) instead of borrowing an
+    unrelated country's slate.
 
     Enables health gate to engage for expansion cities (e.g. 'marrakech' → 'morocco')
     that aren't individually seeded in _HEALTH_SLATES.
     """
-    catalog_path = os.path.join(os.path.dirname(__file__), "..", "..", "ucp-merchant", "catalog.json")
+    from utils.intent_parser import CITY_TO_ISO2  # local import: avoid module-init-order coupling
+
     result: dict[str, str] = {}
-    try:
-        with open(catalog_path, encoding="utf-8") as f:
-            catalog = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return result
-    for hotel in catalog:
-        city = canonical_place_key(str(hotel.get("city", "")).strip())
-        if not city:
-            continue
-        if city in _HEALTH_SLATES:
+    for city, iso2 in CITY_TO_ISO2.items():
+        key = canonical_place_key(city)
+        if not key or key in _HEALTH_SLATES:
             continue  # already has a direct slate — no need to map
-        country_name = str(hotel.get("country", "")).strip().lower()
-        slate_key = _COUNTRY_NAME_TO_SLATE_KEY.get(country_name)
+        slate_key = _COUNTRY_ISO2_TO_SLATE_KEY.get(iso2)
         if slate_key:
-            result.setdefault(city, slate_key)
+            result.setdefault(key, slate_key)
     return result
 
 
@@ -3229,6 +3357,7 @@ def assess_destination(
     buffer_days: int = DEFAULT_BUFFER_DAYS,
     simulate_source_unreachable: bool = False,
     held_vaccine_certs: "frozenset[str] | set[str] | None" = None,
+    arriving_from_country: str | None = None,
 ) -> dict[str, Any]:
     """
     Assess ONE destination: resolve the CDC slate, run the mandatory-cert gate,
@@ -3249,6 +3378,12 @@ def assess_destination(
 
     An UNKNOWN slate (no seed) → conservative CANNOT_COMPLETE
     (BLOCK_UNKNOWN_SLATE) — NEVER a silent OK.
+
+    `arriving_from_country` (#52, OPTIONAL/back-compat — default None → byte-
+    identical to before): the ISO-2 country this leg is reached FROM (e.g. the
+    previous leg's destination on this same trip). Only consulted for
+    `origin_conditional` REQUIRED_FOR_ENTRY rows (see _yf_origin_condition) — every
+    other row is unaffected, so a caller that never passes this stays unchanged.
     """
     key = canonical_place_key(place_key or "")
     try:
@@ -3330,7 +3465,11 @@ def assess_destination(
         usd = int(money["usd_cents"]) if money else 0
         total_usd += usd
 
-        is_mandatory = vrow["kind"] == RequirementKind.REQUIRED_FOR_ENTRY
+        # #52 — an origin_conditional REQUIRED_FOR_ENTRY row's mandate only applies
+        # when THIS traveler's actual transit origin triggers it (see
+        # _yf_origin_condition); every other row is untouched (applies=True, note=None).
+        yf_applies, yf_condition_note = _yf_origin_condition(vrow, arriving_from_country)
+        is_mandatory = vrow["kind"] == RequirementKind.REQUIRED_FOR_ENTRY and yf_applies
         is_held = vrow["vaccine"] in held   # #70: traveler already holds this cert
         billed_usd += 0 if is_held else usd
         obtainable = available >= required
@@ -3353,6 +3492,13 @@ def assess_destination(
             "validity_years": vrow["validity_years"],
             "earliest_feasible_departure": earliest,
             "note": vrow.get("note", ""),
+            # #52 — present (non-None) ONLY on origin_conditional rows; absent/None
+            # key on every other row (back-compat / no noisy field on unrelated jabs).
+            "origin_conditional": bool(vrow.get("origin_conditional", False)) or None,
+            "entry_cert_applies": (
+                yf_applies if vrow.get("origin_conditional") else None
+            ),
+            "origin_condition_note": yf_condition_note,
         }
         vaccines.append(vrec)
 
@@ -3408,6 +3554,9 @@ def assess_destination(
     mandatory_cost_usd = sum(
         int(v["usd_cents"]) for v in vaccines
         if v["kind"] == RequirementKind.REQUIRED_FOR_ENTRY and not v.get("held")
+        # #52: an origin_conditional row whose condition did NOT trigger for this
+        # traveler (entry_cert_applies is False) is not actually mandatory for them.
+        and v.get("entry_cert_applies") is not False
     )
     optional_items = [
         {
@@ -3463,6 +3612,7 @@ def assess(
     buffer_days: int = DEFAULT_BUFFER_DAYS,
     simulate_source_unreachable: bool = False,
     held_vaccine_certs: list[str] | None = None,
+    origin_nationality: str | None = None,
 ) -> dict[str, Any]:
     """
     The core deterministic Health assessment for a whole trip — NO LLM, NO network.
@@ -3471,6 +3621,14 @@ def assess(
         legs: ordered list of {place_key|city|country, departure_date|checkin} dicts.
         today: REQUIRED — the ISO date the booking is being made (the gate's clock).
                MUST be supplied by the caller; raises ValueError if absent.
+        origin_nationality: #52, OPTIONAL/back-compat (default None -> byte-identical
+               to before). ISO-2 traveler nationality, used ONLY as leg 0's transit
+               origin for origin_conditional mandates (e.g. yellow fever) when this
+               trip has no earlier leg to derive a real transit chain from. A
+               REASONABLE proxy (same field Compliance already keys off), NOT a
+               substitute for true departure-airport data — documented limitation,
+               see _YF_ENDEMIC_ORIGIN_COUNTRIES. Legs after the first always prefer
+               the actual previous leg's destination over this fallback.
                (D7 contract: no wall-clock fallback on the determinism-critical path.)
         buffer_days: safety-buffer calendar days (deterministic constant default).
 
@@ -3512,12 +3670,35 @@ def assess(
     already_costed_mandatory: set[str] = set()      # #70: dedup for the ENFORCED mandatory line
     mandatory_line_items: list[dict[str, Any]] = []  # #70: entry-required-and-NOT-held only
     held = frozenset(held_vaccine_certs or [])       # #70: certs the traveler already holds
+    # #52 — the previous leg's resolved destination ISO2, threaded to the NEXT leg
+    # as `arriving_from_country` (transit-based mandates, e.g. yellow fever). None
+    # for leg 0 (this trip has no predecessor leg to derive it from — the
+    # traveler's TRUE home-country origin is a separate, larger scope gap; see the
+    # _YF_ENDEMIC_ORIGIN_COUNTRIES docstring above).
+    prev_dest_iso2: str | None = None
 
     for i, leg in enumerate(legs):
-        place = (leg.get("place_key") or leg.get("city") or leg.get("country")
-                 or leg.get("dest_country") or "")
+        # #109: dest_country FIRST. It is intent_parser's authoritative city→ISO2
+        # resolution (CITY_TO_ISO2, the SAME table used to set this field) and
+        # must win over place_key/city/country — bare strings that get re-resolved
+        # against this module's OWN, independently-built catalog-derived guess
+        # (_CITY_TO_SLATE_KEY) and can silently disagree with dest_country on a
+        # city-name collision (e.g. "Salem" — India vs United States in
+        # catalog.json) even when dest_country is already correct. Matches the
+        # #87 priority pattern (dest_country before the catalog-derived guess).
+        place = (leg.get("dest_country") or leg.get("place_key") or leg.get("city")
+                 or leg.get("country") or "")
         dep = (leg.get("departure_date") or leg.get("checkin") or today)
         leg_key = str(leg.get("leg_id", i))
+
+        # #52 — leg 0 has no in-trip predecessor to derive a transit origin from;
+        # fall back to the traveler's stated nationality (a real, already-available
+        # field — not fabricated) as a REASONABLE origin proxy. Legs after the
+        # first NEVER use this fallback — they always prefer the actual previous
+        # leg's destination (a strictly better signal) over nationality.
+        arriving_from = prev_dest_iso2
+        if arriving_from is None and i == 0 and origin_nationality:
+            arriving_from = origin_nationality.strip().upper()
 
         d = assess_destination(
             place_key=place,
@@ -3526,8 +3707,19 @@ def assess(
             buffer_days=buffer_days,
             simulate_source_unreachable=simulate_source_unreachable,
             held_vaccine_certs=held,
+            arriving_from_country=arriving_from,
         )
         d["leg_id"] = leg_key
+        # #52 — resolve THIS leg's own destination ISO2 for the NEXT leg's
+        # arriving_from_country (prefer an explicit dest_country; fall back to
+        # reverse-resolving the place_key's slate key). Unresolvable -> None (the
+        # next leg conservatively treats its origin as unknown, same as today).
+        _this_dest_iso2 = leg.get("dest_country") or _SLATE_KEY_TO_ISO2.get(
+            canonical_place_key(place or "")
+        )
+        prev_dest_iso2 = (
+            str(_this_dest_iso2).strip().upper() if _this_dest_iso2 else None
+        )
         # TTL enforcement: a seeded CDC/WHO slate past its own fetched_at+ttl
         # freshness window must never keep being served as confidently current.
         # Downgrade can_complete=True -> None (the existing "unverified"
@@ -3572,7 +3764,10 @@ def assess(
         # Recommended + already-held vaccines are excluded (surfaced separately, not in budget).
         incremental_mandatory_usd = 0
         for vrec in d.get("vaccines", []):
-            if vrec["kind"] == RequirementKind.REQUIRED_FOR_ENTRY and not vrec.get("held"):
+            if (vrec["kind"] == RequirementKind.REQUIRED_FOR_ENTRY and not vrec.get("held")
+                    # #52: an origin_conditional row that did not trigger for this
+                    # traveler (entry_cert_applies is False) is not billed as mandatory.
+                    and vrec.get("entry_cert_applies") is not False):
                 vax_id = vrec["vaccine"]
                 if vax_id not in already_costed_mandatory:
                     already_costed_mandatory.add(vax_id)
@@ -4029,6 +4224,7 @@ class HealthAgent(A2AAgent):
             buffer_days=buffer_days,
             simulate_source_unreachable=bool(payload.get("simulate_source_unreachable", False)),
             held_vaccine_certs=_held if isinstance(_held, list) else None,
+            origin_nationality=payload.get("origin_nationality") or None,  # #52
         )
 
         logger.info(

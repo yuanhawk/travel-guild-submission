@@ -1027,6 +1027,18 @@ def _build_orch() -> "tuple[TravelOrchestrator, '_LocalCatalogTransport | None']
     # other agents use (search_catalog kind=FOOD_DELIVERY). Returns the merchant
     # structuredContent dict ({results, disclosure}) or None on any failure so the
     # supper hook degrades to an honest "unavailable" rather than crashing.
+    #
+    # Root-cause fix: `merchant` is an in-process httpx.BaseTransport in the
+    # DEFAULT (_LocalCatalogTransport) deployment mode, but is explicitly set to
+    # None a few lines above in the REAL Go-merchant deployment mode
+    # (UCP_MERCHANT_URL set) — every OTHER agent (Budget/Accommodation/Critic)
+    # already handles this by building an httpx.Client with `transport=` set ONLY
+    # when a local transport is configured, so a None falls through to httpx's
+    # DEFAULT (real network) transport hitting MERCHANT_MCP_URL. This hook used to
+    # call `merchant.handle_request(...)` unconditionally, which raised
+    # AttributeError on None in the real-merchant deployment mode — silently
+    # swallowed by the `except Exception` below. Mirror the sibling agents' seam
+    # instead of a bespoke direct-call.
     def _food_search(query: dict) -> dict | None:
         body = {
             "jsonrpc": "2.0", "id": str(uuid4()),
@@ -1034,11 +1046,13 @@ def _build_orch() -> "tuple[TravelOrchestrator, '_LocalCatalogTransport | None']
             "params": {"name": "search_catalog",
                        "arguments": {"meta": {"autonomy_level": "L2"}, "query": query}},
         }
+        client_kwargs: dict[str, Any] = {}
+        if merchant is not None:
+            client_kwargs["transport"] = merchant
+        url = _merchant_url or "http://ucp-merchant/api/ucp/mcp"
         try:
-            resp = merchant.handle_request(
-                httpx.Request("POST", "http://ucp-merchant/api/ucp/mcp",
-                              json=body)
-            )
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.post(url, json=body, timeout=15.0)
             return resp.json().get("result", {}).get("structuredContent")
         except Exception:
             return None
@@ -1477,6 +1491,13 @@ async def negotiate(request: Request) -> JSONResponse:
     nat = body.get("nationality")
     if nat is not None and not isinstance(nat, str):
         return JSONResponse({"error": "invalid request", "detail": "'nationality' must be a string"}, status_code=400)
+    # Adversarial-test finding: a non-string user_id (bool/int/array/object) reached
+    # merchant_checkout_owner() below unvalidated and crashed with a bare 500 instead
+    # of a clean 4xx, unlike every other top-level field which is explicitly type-
+    # checked above. Close the gap the same way.
+    uid = body.get("user_id")
+    if uid is not None and not isinstance(uid, str):
+        return JSONResponse({"error": "invalid request", "detail": "'user_id' must be a string"}, status_code=400)
 
     # #161 — canonical Go-merchant checkout owner, computed from the RAW body
     # BEFORE the anon uuid4 stamp below (a random per-request uuid4 must never be
@@ -2092,7 +2113,7 @@ def _persist_and_sanitize_plan(
     double-submit, a second device, or the same request re-run after catalog/price
     data changed) would otherwise silently overwrite an existing held row's
     checkout_id/envelope/total UNDER THE SAME CONSENT KEY — a stale tab still
-    showing the OLD total could then /confirm and book the NEW, unseen content.
+    showing the OLD content could then /confirm and book the NEW, unseen plan.
     Guarded below: if a row already exists under this idempotency_key and it is
     not a fresh, safely-overwritable plan_ready row (see the M1/M4/M5/M6 comment
     block below), never clobber it in place — mint a distinguishable derived key
@@ -2100,6 +2121,16 @@ def _persist_and_sanitize_plan(
     key for a new generation rather than mutating the parent in place), so the
     old row/key is left completely untouched and any caller of /confirm on the
     old key keeps seeing exactly what it originally reviewed.
+
+    M6-content fix: the divergence check below MUST NOT rely on
+    package_total_cents alone — the demo catalog's pricing is flat/deterministic
+    enough that two GENUINELY DIFFERENT plans (different legs/cities, same
+    dates/budget shape) routinely land on the exact same total (e.g. two single-
+    city legs priced off the same nightly rate x los). A second /negotiate with
+    the same idempotency_key but a different destination whose total happens to
+    coincide with the first must still fork — reuses _plan_content_hash (M9,
+    below) over legs+day_plans so the fork-guard's own "content" claim in the M6
+    comment block is actually true, not just total-priced.
 
     `caller_reclaims_supersede` — set by refine() ONLY. A /refine that reverts to
     an EARLIER generation's exact parameters re-mints THAT generation's
@@ -2131,6 +2162,13 @@ def _persist_and_sanitize_plan(
     idk = result.get("idempotency_key") or ctx.get("idempotency_key")
     new_total = (result.get("package_total_with_fees_cents")
                  or result.get("package_total_cents"))
+    # M6-content — computed BEFORE the fork-guard below so it can be compared
+    # against whatever existing row is under this same idempotency_key. `result`
+    # still carries its top-level legs/day_plans here (only _confirm_ctx/
+    # checkout_id/_trip_request have been popped so far), so this is the exact
+    # same hash `_plan_content_hash` would produce once stamped as plan_version
+    # further down. Never raises (see _plan_content_hash's own try/except).
+    new_content_hash = _plan_content_hash(result)
     # M1/M4/M5/M6 — the derived-key guard originally only forked on TOTAL
     # DIVERGENCE (see the docstring above). Three more ways an existing row
     # under this SAME idempotency_key is not a fresh, safely-overwritable
@@ -2180,6 +2218,25 @@ def _persist_and_sanitize_plan(
             total_diverges = (
                 existing_total is not None and int(existing_total) != int(new_total or 0)
             )
+            # M6-content fix — the original guard here compared package_total_cents
+            # ONLY, so two DIFFERENT plans (different legs/cities/day_plans) under
+            # the same idempotency_key whose totals happened to coincide (routine
+            # with this catalog's flat/deterministic demo pricing — see docstring
+            # above) silently overwrote each other in place: no fork, no warning,
+            # no superseded_by link. `existing_content_hash` prefers the stored
+            # plan_version (M9's stamp, already sitting on the persisted envelope)
+            # and falls back to recomputing it for any legacy row saved before
+            # plan_version existed. Compared against `new_content_hash` (computed
+            # above, before this function pops/strips anything content-bearing).
+            existing_envelope = existing.get("envelope")
+            existing_envelope = existing_envelope if isinstance(existing_envelope, dict) else {}
+            existing_content_hash = (
+                existing_envelope.get("plan_version") or _plan_content_hash(existing_envelope)
+            )
+            content_diverges = (
+                bool(existing_content_hash) and bool(new_content_hash)
+                and existing_content_hash != new_content_hash
+            )
             # M1 — best-effort in-flight check (see comment block above).
             # `getattr` degrades to "not locked" for any caller that never
             # wires up the real app (e.g. a direct/test call to this function
@@ -2192,6 +2249,25 @@ def _persist_and_sanitize_plan(
                 fork_reason = "existing_row_superseded"      # M5
             elif locked_now:
                 fork_reason = "existing_row_locked_inflight"  # M1
+            elif content_diverges and not caller_reclaims_supersede:
+                # M6-content fix — but exempt a refine() revert-to-earlier-
+                # generation reclaim (caller_reclaims_supersede=True), exactly
+                # as M5 above does. A revert re-mints an EARLIER generation's
+                # deterministic idempotency_key and legitimately lands back on
+                # THAT generation's own row to reclaim it as the current
+                # generation; the regenerated envelope can differ in shape from
+                # the stored one (e.g. legs carry more request-derived fields
+                # than the persisted envelope's trimmed copy) WITHOUT being a
+                # genuinely-different trip. Forking here would hand refine() a
+                # derived key instead of the reclaimed one, so its step-8
+                # clear_superseded(new_key)/mark_superseded pair would never
+                # clear the reclaimed parent's STALE superseded_by — the exact
+                # H2 mutual-cycle hazard caller_reclaims_supersede exists to
+                # avoid. The content guard stays fully armed for every OTHER
+                # caller (/negotiate, /negotiate_text — a direct re-POST, never
+                # a supersede-aware revert), i.e. #110's core protection: two
+                # coincidentally same-key DIFFERENT trips still fork.
+                fork_reason = "content_diverged"              # M6-content fix
             elif total_diverges:
                 fork_reason = "total_diverged"                # M6 / original guard
         if fork_reason:
@@ -2218,9 +2294,12 @@ def _persist_and_sanitize_plan(
             # branch is reached only when the row is NOT locked_now, so it can
             # never race a live mark_booked's superseded_by='' compare-and-set.
             # Deferred until AFTER save_plan() below persists the derived row
-            # (mark_superseded is an UPDATE, not an INSERT).
+            # (mark_superseded is an UPDATE, not an INSERT). content_diverged
+            # gets the same forward-pointing treatment as total_diverged — both
+            # are the same "this key's content moved on" case, just detected via
+            # a different signal.
             _supersede_after_save = (
-                (parent_idk, derived_idk) if fork_reason == "total_diverged" else
+                (parent_idk, derived_idk) if fork_reason in ("total_diverged", "content_diverged") else
                 # M5 — this derived row is just a re-persisted duplicate of the
                 # ALREADY-superseded row's stale (pre-refine) content; point IT
                 # at the SAME real current generation so it can never become an
@@ -2790,7 +2869,10 @@ async def refine(request: Request) -> JSONResponse:
     await _trip_lock.acquire()
     try:
         from orchestration.store import get_store
-        from utils.followup_parser import parse_followup, apply_delta, build_assistant_reply
+        from utils.followup_parser import (
+            parse_followup, apply_delta, build_assistant_reply, compute_refine_diff,
+            normalize_ops, build_domain_answer, UNSUPPORTED_OP_PREFIX,
+        )
         store = get_store()
 
         # 1. Load the held plan.
@@ -2880,10 +2962,54 @@ async def refine(request: Request) -> JSONResponse:
             return JSONResponse({"outcome": "query_answered", "session_id": session_id,
                                  "idempotency_key": idk, "assistant_reply": qa_reply})
 
+        # B5: domain-question fast-path — a QUESTION about health/fraud/insurance/
+        # compliance, routed to a pure formatter over the verdict already computed
+        # for THIS trip during initial planning (build_domain_answer — no re-plan,
+        # no new agent call; see its docstring in followup_parser.py). Checked
+        # BEFORE the unsupported/ops branch below so a genuine question is answered
+        # rather than falling through to a declined "that's not supported" reply.
+        # The plan is UNCHANGED — same idempotency_key, no new generation minted.
+        question_domain = delta.get("question_domain")
+        if question_domain and not delta.get("ops"):
+            answer = build_domain_answer(question_domain, row.get("envelope") or {})
+            da_reply = answer["headline"]
+            da_user_turn: dict = {"role": "user", "content": message, "ts": _iso_now(),
+                                  "idempotency_key": idk, "delta": delta, "changed": None}
+            da_asst_turn: dict = {"role": "assistant", "content": da_reply, "ts": _iso_now(),
+                                  "idempotency_key": idk, "delta": None, "changed": None}
+            try:
+                store.append_turns(session_id, turns=[da_user_turn, da_asst_turn])
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("server: conversation append failed (ignored): %s", exc)
+            return JSONResponse({
+                "outcome": "domain_answer",
+                "session_id": session_id,
+                "idempotency_key": idk,
+                "assistant_reply": da_reply,
+                "answer": answer,
+            })
+
         # Check whether all ops are swap_item (item-level) — not applied in MVP.
         ops = delta.get("ops") or []
         all_swap = ops and all(o.get("op") == "swap_item" for o in ops if isinstance(o, dict))
         has_only_unsupported = delta.get("unsupported") or (ops and all_swap and not delta.get("reason"))
+
+        # #116 total-failure safety net: the LLM's own top-level `unsupported`
+        # flag and the all-swap_item case don't cover every way a delta can
+        # carry ZERO recognisable ops (e.g. every op is a typo'd/garbage kind
+        # that apply_delta itself rejects one-by-one via UNSUPPORTED_OP_PREFIX
+        # entries in `changed`, with the LLM still reporting unsupported=False).
+        # Speculatively apply the delta here (apply_delta is pure/idempotent —
+        # the real apply below re-runs it, cheap and side-effect-free) purely to
+        # check whether EVERY entry it would report is unsupported; if so this
+        # is really a total-failure case and must decline, not silently re-plan
+        # an unchanged trip as a false "success".
+        if ops and not has_only_unsupported:
+            _probe_request, _probe_changed = apply_delta(trip_request, delta)
+            if _probe_changed and all(
+                isinstance(c, str) and c.startswith(UNSUPPORTED_OP_PREFIX) for c in _probe_changed
+            ):
+                has_only_unsupported = True
 
         user_turn: dict = {
             "role": "user",
@@ -3048,12 +3174,19 @@ async def refine(request: Request) -> JSONResponse:
         except Exception as exc:  # noqa: BLE001
             _log.warning("server: conversation append failed (ignored): %s", exc)
 
+        # B3 — structured, machine-readable diff between the OLD trip_request and
+        # the NEW one this refine actually applied, with a per-field `side_effect`
+        # flag for anything that changed WITHOUT being directly named by an op in
+        # `delta`. Kept ALONGSIDE `changed` for backward compat.
+        diff = compute_refine_diff(trip_request, new_request, ops)
+
         return JSONResponse({
             "outcome": "plan_ready",
             "session_id": session_id,
             "idempotency_key": new_key,
             "assistant_reply": assistant_reply,
             "changed": changed,
+            "diff": diff,
             "delta_applied": delta,
             "plan": dict(result),
         })

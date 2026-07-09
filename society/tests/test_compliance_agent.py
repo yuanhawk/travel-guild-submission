@@ -955,6 +955,74 @@ def test_newly_seeded_destinations_return_real_verdict_not_unknown_flag():
     assert ctrl["unverified_flag"] is True
 
 
+def test_ir_us_national_never_silently_allowed_bug53():
+    """finding #53 rerun (HIGH): the IR seed row's eligible_nationalities used to be
+    ["US"], which — because eligible_nationalities is an ALLOW-list everywhere else
+    in this file (fetch_entry_rule / gate_leg) — inverted the row's own program
+    label ("Iran visa - US nationals (ineligible for standard tourist visa)") and
+    made US the ONE nationality that resolved to a real, booking-eligible verdict,
+    while every other nationality (no seeded rule) correctly degraded to the
+    conservative UNKNOWN flag. After the fix (eligible_nationalities=[]), US must
+    get the SAME conservative treatment as GB/DE/CA — never a silent allow."""
+    us = gate_leg(dest_country="IR", nationality="US",
+                  departure_date="2027-01-15", today=TODAY)
+    # Pre-fix this was kind=VISA_REQUIRED, allowed=True (a real booking-eligible
+    # verdict for a nationality the program's own label says is ineligible).
+    assert us["kind"] == EntryKind.UNKNOWN
+    assert us["allowed"] is None
+    assert us["unverified_flag"] is True
+    assert us["reason"] == LegReason.BLOCK_UNKNOWN_RULE
+
+    # Parity check: US must resolve identically to other nationalities with no
+    # seeded IR rule (GB/DE/CA) — the fix must not special-case US in either
+    # direction.
+    for nat in ("GB", "DE", "CA"):
+        v = gate_leg(dest_country="IR", nationality=nat,
+                     departure_date="2027-01-15", today=TODAY)
+        assert v["kind"] == us["kind"]
+        assert v["allowed"] == us["allowed"]
+        assert v["reason"] == us["reason"]
+
+    # Whole-trip: US/IR must read as flagged, never a clean can_satisfy.
+    trip = check_eligibility(
+        legs=[{"dest_country": "IR", "departure_date": "2027-01-15"}],
+        nationality="US", today=TODAY)
+    assert trip["verdict"] == GateVerdict.ALLOW_WITH_FLAGS
+    assert trip["has_eligibility_flags"] is True
+    assert len(trip["flagged_legs"]) == 1
+    assert trip["flagged_legs"][0]["dest_country"] == "IR"
+
+
+def test_sg_visa_required_wildcard_hard_blocks_non_visa_free_nationality_bug53():
+    """finding #53 rerun (medium): SG previously had only the visa-free row and no
+    VISA_REQUIRED wildcard fallback (unlike every other seeded country — US, JP,
+    CN, etc. all have one), so a nationality like IN (India — explicitly documented
+    in the seed comment as requiring a visa to enter Singapore) degraded to the
+    soft "unverified" conservative FLAG instead of a real hard block with a genuine
+    lead-time gate. After the fix, SG/IN resolves to a real VISA_REQUIRED rule."""
+    from agents.compliance_agent import fetch_entry_rule
+    rule, _ = fetch_entry_rule("SG", "IN")
+    assert rule is not None
+    assert rule["kind"] == EntryKind.VISA_REQUIRED
+    assert rule["processing_lead_business_days"] > 0
+    assert rule["fee_cents"] > 0
+
+    # Insufficient lead time -> real hard BLOCK_LEAD_TIME, not the soft UNKNOWN flag.
+    v = gate_leg(dest_country="SG", nationality="IN",
+                 departure_date="2026-06-19", today=TODAY)
+    assert v["kind"] == EntryKind.VISA_REQUIRED
+    assert v["allowed"] is False
+    assert v["reason"] == LegReason.BLOCK_LEAD_TIME
+    assert v["earliest_feasible_departure"] is not None
+
+    # Far-out departure -> a real bookable-with-fee verdict, not a soft flag.
+    v2 = gate_leg(dest_country="SG", nationality="IN",
+                  departure_date="2026-12-01", today=TODAY)
+    assert v2["allowed"] is True
+    assert v2["kind"] == EntryKind.VISA_REQUIRED
+    assert v2.get("unverified_flag") is not True
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
