@@ -114,6 +114,15 @@ type store struct {
 	wallets           map[string]*wallet          // SIMULATED prepaid wallet: wallet_session_id -> balance+ledger (wallet.go)
 	circleSettlements map[string]circleSettlement // Circle Agentic Economy: booking_ref -> REAL testnet settlement (circle_usdc.go)
 	circleInFlight    map[string]chan struct{}     // booking_ref -> close-when-done, guards against concurrent double-transfer (circle_usdc.go)
+	// NEW-4 aggregate spend ceiling. Cents RESERVED-OR-SETTLED by the Circle
+	// rail for this process's lifetime: incremented under st.mu at the same
+	// moment the in-flight marker is taken (i.e. BEFORE the network round
+	// trip, so concurrent settles for different booking_refs cannot
+	// collectively overshoot the cap), decremented again only if that attempt
+	// fails. Invariant once no settle is in flight:
+	//   circleCommittedCents == sum(circleSettlements[*].TotalCents)
+	// In-memory only, like everything else in this store — see circleSettle.
+	circleCommittedCents int64
 }
 
 func newStore() *store {

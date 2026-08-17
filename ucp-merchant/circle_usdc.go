@@ -36,23 +36,33 @@ package main
 //     to silently no-op or fall back to a fake transaction id — it returns a clear
 //     CIRCLE_NOT_CONFIGURED error, mirroring the fail-honest pattern used elsewhere
 //     in this codebase (e.g. itinerario-web's narrate.ts NO_GEMINI_CONFIG).
-//   - SECURITY: because this rail moves real (testnet) funds with no per-amount
-//     ceiling other than the shared budget hard-max, main.go refuses to start if
-//     CIRCLE_* credentials are configured but UCP_ADMIN_TOKEN is empty — an
-//     unauthenticated real-money endpoint is not an acceptable default.
+//   - SECURITY: this rail moves real (testnet) funds under two independent
+//     ceilings — per booking via BUDGET_HARD_MAX_USD (checked at each entry
+//     point, since the checkout path's own ceiling is strictly tighter than
+//     the admin path's — see circleSettle's doc comment) and cumulatively via
+//     CIRCLE_AGGREGATE_CAP_USD (enforced once, inside circleSettle, the single
+//     choke point both entry points funnel through). main.go additionally
+//     refuses to start if CIRCLE_* credentials are configured but
+//     UCP_ADMIN_TOKEN is empty — an unauthenticated real-money endpoint is not
+//     an acceptable default.
 //
 // Endpoints:
 //
 //	POST /admin/circle/settle  {"booking_ref":"...","total_cents":120000}
 //	     -> 200 {"transaction_id","status","booking_ref","total_cents",
 //	             "rail":"circle_usdc_testnet","network","note"}
+//	     -> 403 {"error":"exceeds_circle_aggregate_cap","note","settled_cents",
+//	             "requested_cents","aggregate_cap_cents","rail"} if the
+//	        cumulative ceiling (CIRCLE_AGGREGATE_CAP_USD) would be exceeded
 //	     -> 409 if booking_ref was already settled for a DIFFERENT total_cents
 //	     -> 501 {"error":"CIRCLE_NOT_CONFIGURED","note"} if credentials are unset
 //	     -> 502 {"error":"circle_transfer_failed","note"} on any upstream failure
 //	        (upstream response bodies are logged server-side, never echoed to the
 //	        client — they can contain wallet IDs and other operational detail)
 //	GET  /admin/circle/settle
-//	     -> {"settlements":[...],"total_settled_cents","count","rail","network"}
+//	     -> {"settlements":[...],"total_settled_cents","count",
+//	         "aggregate_cap_cents","aggregate_committed_cents",
+//	         "aggregate_remaining_cents","rail","network"}
 
 import (
 	"bytes"
@@ -64,6 +74,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -85,6 +96,18 @@ const (
 	// circleEntitySecretBytes is the required raw length of CIRCLE_ENTITY_SECRET
 	// per Circle's spec (32-byte entity secret, hex-encoded => 64 hex chars).
 	circleEntitySecretBytes = 32
+
+	// circleDefaultAggregateCapUSD is the built-in process-lifetime ceiling on
+	// TOTAL cents this rail may move, applied when CIRCLE_AGGREGATE_CAP_USD is
+	// unset or unparseable. 5x the default BUDGET_HARD_MAX_USD ($2000): large
+	// enough that a demo can complete several real bookings, small enough that a
+	// runaway loop stops after a handful of transfers instead of draining a
+	// funded wallet. There is deliberately NO "unbounded" setting.
+	circleDefaultAggregateCapUSD = 10000.0
+
+	circleAggregateCapNote = "this settlement was refused because it would push the Circle rail's " +
+		"cumulative settled total past CIRCLE_AGGREGATE_CAP_USD — the process-lifetime ceiling on " +
+		"total USDC this rail may move across ALL bookings. No transfer was made."
 )
 
 type circleSettlement struct {
@@ -102,14 +125,27 @@ type circleConfig struct {
 	EntitySecretHex  string // CIRCLE_ENTITY_SECRET — 32-byte hex, generated+registered once via Circle's dashboard
 	SourceWalletID   string // CIRCLE_SOURCE_WALLET_ID — the agent's own developer-controlled wallet
 	MerchantWalletID string // CIRCLE_MERCHANT_WALLET_ID — destination wallet (the merchant being paid)
+	// AggregateCapCents is NOT a credential and is NOT part of configured():
+	// the rail can be unconfigured (no creds) with a cap set, and vice versa.
+	// Zero value means "nothing may be settled" — a hand-built circleConfig
+	// literal that forgot this field fails CLOSED, never unbounded.
+	AggregateCapCents int64 // CIRCLE_AGGREGATE_CAP_USD
 }
 
 func loadCircleConfig() circleConfig {
+	// aggregateCap, not "cap" — shadowing the builtin in a money-path config
+	// loader is a readability trap worth avoiding even though it's legal.
+	aggregateCap := usdCents("CIRCLE_AGGREGATE_CAP_USD", circleDefaultAggregateCapUSD)
+	if aggregateCap < 0 {
+		log.Printf("CIRCLE_AGGREGATE_CAP_USD is negative (%d¢) — clamping to 0 (no settlement permitted)", aggregateCap)
+		aggregateCap = 0
+	}
 	return circleConfig{
-		APIKey:           os.Getenv("CIRCLE_API_KEY"),
-		EntitySecretHex:  os.Getenv("CIRCLE_ENTITY_SECRET"),
-		SourceWalletID:   os.Getenv("CIRCLE_SOURCE_WALLET_ID"),
-		MerchantWalletID: os.Getenv("CIRCLE_MERCHANT_WALLET_ID"),
+		APIKey:            os.Getenv("CIRCLE_API_KEY"),
+		EntitySecretHex:   os.Getenv("CIRCLE_ENTITY_SECRET"),
+		SourceWalletID:    os.Getenv("CIRCLE_SOURCE_WALLET_ID"),
+		MerchantWalletID:  os.Getenv("CIRCLE_MERCHANT_WALLET_ID"),
+		AggregateCapCents: aggregateCap,
 	}
 }
 
@@ -332,6 +368,20 @@ type circleTransferResponse struct {
 // request it never actually executed).
 var errCircleAmountMismatch = fmt.Errorf("booking_ref already settled for a different total_cents")
 
+// circleCapExceededError is returned when a settlement would push the rail's
+// cumulative outflow past cfg.AggregateCapCents. Carries the numbers so the
+// admin endpoint can report them without a second, racy lock acquisition.
+type circleCapExceededError struct {
+	SettledCents   int64
+	RequestedCents int64
+	CapCents       int64
+}
+
+func (e *circleCapExceededError) Error() string {
+	return fmt.Sprintf("circle aggregate spend cap exceeded: %d¢ already committed + %d¢ requested > %d¢ cap",
+		e.SettledCents, e.RequestedCents, e.CapCents)
+}
+
 // circleSettle is the live analogue of alipaySettle: same idempotent-per-booking
 // contract, but this one makes a genuine outbound HTTP call instead of hashing.
 // Returns (settlement, configured=false) immediately, with no HTTP call, if Circle
@@ -344,6 +394,7 @@ var errCircleAmountMismatch = fmt.Errorf("booking_ref already settled for a diff
 // every unrelated store operation in the process), so a per-booking in-flight
 // marker does this narrowly instead.
 func (st *store) circleSettle(cfg circleConfig, bookingRef string, totalCents int) (circleSettlement, bool, error) {
+	var committed bool // set true only when the record is written into st.circleSettlements
 	for {
 		st.mu.Lock()
 		if rec, ok := st.circleSettlements[bookingRef]; ok {
@@ -351,7 +402,7 @@ func (st *store) circleSettle(cfg circleConfig, bookingRef string, totalCents in
 			if rec.TotalCents != totalCents {
 				return circleSettlement{}, true, errCircleAmountMismatch
 			}
-			return rec, true, nil // idempotent replay — no second HTTP call
+			return rec, true, nil // idempotent replay — no second HTTP call, NO cap check, NO reservation
 		}
 		wait, inFlight := st.circleInFlight[bookingRef]
 		if inFlight {
@@ -361,13 +412,33 @@ func (st *store) circleSettle(cfg circleConfig, bookingRef string, totalCents in
 		}
 		if !cfg.configured() {
 			st.mu.Unlock()
-			return circleSettlement{}, false, nil
+			return circleSettlement{}, false, nil // unconfigured — consumes no headroom
+		}
+		// NEW-4: aggregate ceiling. Checked and RESERVED in the same critical
+		// section that takes the in-flight marker, so a settle that is about to
+		// hit the network already holds its headroom — N concurrent settles for
+		// N different booking_refs cannot collectively overshoot. Placed AFTER
+		// the replay and !configured branches on purpose: a replay must still
+		// return its cached record even if the cap is now exhausted, and an
+		// unconfigured rail must still report CIRCLE_NOT_CONFIGURED.
+		if st.circleCommittedCents+int64(totalCents) > cfg.AggregateCapCents {
+			settled := st.circleCommittedCents
+			st.mu.Unlock()
+			return circleSettlement{}, true, &circleCapExceededError{
+				SettledCents:   settled,
+				RequestedCents: int64(totalCents),
+				CapCents:       cfg.AggregateCapCents,
+			}
 		}
 		done := make(chan struct{})
 		st.circleInFlight[bookingRef] = done
+		st.circleCommittedCents += int64(totalCents) // RESERVE
 		st.mu.Unlock()
 		defer func() {
 			st.mu.Lock()
+			if !committed {
+				st.circleCommittedCents -= int64(totalCents) // release: no transfer landed
+			}
 			delete(st.circleInFlight, bookingRef)
 			st.mu.Unlock()
 			close(done)
@@ -444,6 +515,7 @@ func (st *store) circleSettle(cfg circleConfig, bookingRef string, totalCents in
 	}
 	st.mu.Lock()
 	st.circleSettlements[bookingRef] = rec
+	committed = true // reservation becomes a settlement; the defer must not release it
 	st.mu.Unlock()
 	return rec, true, nil
 }
@@ -459,6 +531,16 @@ func (st *store) circleSummary() (recs []circleSettlement, total int) {
 	return recs, total
 }
 
+// circleCommitted reports the cents this rail has reserved-or-settled for this
+// process's lifetime — the quantity checked against cfg.AggregateCapCents.
+// Transiently exceeds the sum of recorded settlements while an attempt is in
+// flight; that conservative direction is deliberate.
+func (st *store) circleCommitted() int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.circleCommittedCents
+}
+
 // maybeCircleSettle is the genuine agent-driven entry point into this rail —
 // called from dispatchTool (mcp.go) right after checkoutTool returns from a
 // complete_checkout call, and ONLY after that call's st.mu has been released
@@ -469,8 +551,10 @@ func (st *store) circleSummary() (recs []circleSettlement, total int) {
 // checkout.settlement_rail="circle_usdc" at create_checkout) and, if present,
 // settles the booking's own total_cents — which checkoutTool already bounded
 // by min(user_budget, BudgetHardMaxCents) before the booking_ref was even
-// generated, so no separate cap check is needed here (unlike the admin
-// endpoint, which is a direct entry point with no such upstream gate).
+// generated, so no separate PER-BOOKING cap check is needed here (unlike the
+// admin endpoint, which is a direct entry point with no such upstream gate);
+// the cumulative ceiling is enforced inside circleSettle, which both entry
+// points funnel through.
 //
 // resp is mutated in place (adding "circle_settlement") and returned for
 // call-site convenience. A booking with no settlement_rail opt-in is
@@ -487,10 +571,18 @@ func maybeCircleSettle(st *store, resp map[string]any) map[string]any {
 	}
 	cfg := loadCircleConfig()
 	rec, attempted, err := st.circleSettle(cfg, bookingRef, int(totalCents))
+	var capErr *circleCapExceededError
 	switch {
 	case !attempted:
 		resp["circle_settlement"] = map[string]any{
 			"error": "CIRCLE_NOT_CONFIGURED", "note": circleNotConfiguredNote,
+		}
+	case errors.As(err, &capErr): // var capErr *circleCapExceededError declared above the switch
+		log.Printf("circle settle refused for booking_ref=%s (complete_checkout path): aggregate cap %d¢ would be exceeded (%d¢ committed + %d¢ requested)",
+			bookingRef, capErr.CapCents, capErr.SettledCents, capErr.RequestedCents)
+		resp["circle_settlement"] = map[string]any{
+			"error": "exceeds_circle_aggregate_cap",
+			"note":  circleAggregateCapNote,
 		}
 	case err == errCircleAmountMismatch:
 		// Structurally shouldn't happen (booking_ref is generated fresh per
@@ -525,14 +617,22 @@ func circleAdminHandler(st *store, budgetHardMaxCents int64) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			recs, total := st.circleSummary()
+			committed := st.circleCommitted()
+			remaining := cfg.AggregateCapCents - committed
+			if remaining < 0 {
+				remaining = 0
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"settlements":         recs,
-				"total_settled_cents": total,
-				"count":               len(recs),
-				"rail":                "circle_usdc_testnet",
-				"network":             circleNetwork,
-				"configured":          cfg.configured(),
-				"note":                circleNote,
+				"settlements":               recs,
+				"total_settled_cents":       total,
+				"count":                     len(recs),
+				"aggregate_cap_cents":       cfg.AggregateCapCents,
+				"aggregate_committed_cents": committed,
+				"aggregate_remaining_cents": remaining,
+				"rail":                      "circle_usdc_testnet",
+				"network":                   circleNetwork,
+				"configured":                cfg.configured(),
+				"note":                      circleNote,
 			})
 		case http.MethodPost:
 			body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
@@ -557,6 +657,20 @@ func circleAdminHandler(st *store, budgetHardMaxCents int64) http.HandlerFunc {
 				writeJSON(w, http.StatusNotImplemented, map[string]string{
 					"error": "CIRCLE_NOT_CONFIGURED",
 					"note":  circleNotConfiguredNote,
+				})
+				return
+			}
+			var capErr *circleCapExceededError
+			if errors.As(err, &capErr) {
+				log.Printf("circle settle refused for booking_ref=%s: aggregate cap %d¢ would be exceeded (%d¢ committed + %d¢ requested)",
+					rf.BookingRef, capErr.CapCents, capErr.SettledCents, capErr.RequestedCents)
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"error":               "exceeds_circle_aggregate_cap",
+					"note":                circleAggregateCapNote,
+					"settled_cents":       capErr.SettledCents,
+					"requested_cents":     capErr.RequestedCents,
+					"aggregate_cap_cents": capErr.CapCents,
+					"rail":                "circle_usdc_testnet",
 				})
 				return
 			}

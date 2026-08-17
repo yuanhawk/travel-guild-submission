@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,9 @@ import (
 // elsewhere in this repo — large enough not to interfere with the small test
 // amounts below, so tests below the cap and above it are both exercisable.
 const testBudgetHardMaxCents = 200000
+
+// testCircleAggregateCapCents mirrors circleDefaultAggregateCapUSD ($10,000).
+const testCircleAggregateCapCents = 1000000
 
 // testEntitySecretHex is a fixed 32-byte (64 hex char) string standing in for
 // a real Circle entity secret — never a real credential, purely a fixture.
@@ -159,9 +163,21 @@ func TestCircleSettleFailsHonestlyWhenNotConfigured(t *testing.T) {
 // run on the httptest.Server's own per-request goroutines, where FailNow is
 // unsafe per the testing package's own documentation.
 type mockCircleServer struct {
-	pubPEM         string
-	transferCalls  int32
-	transferAmount string // last-seen amounts[0], for assertions
+	pubPEM        string
+	transferCalls int32
+	// transferAmountMu guards transferAmount — genuinely concurrent transfers
+	// for DIFFERENT booking_refs (see
+	// TestCircleSettleAggregateCapUnderConcurrentDifferentBookingRefs) can
+	// reach this handler on separate goroutines at once, unlike the
+	// same-booking_ref concurrency test where the in-flight marker guarantees
+	// only one live transfer at a time.
+	transferAmountMu sync.Mutex
+	transferAmount   string // last-seen amounts[0], for assertions (read only after the writing goroutine(s) have finished)
+	// failTransfer, when set, makes the /developer/transactions/transfer
+	// handler return 502 instead of recording a success — used to prove a
+	// failed attempt releases its aggregate-cap reservation (see
+	// TestCircleSettleFailedTransferDoesNotConsumeCap).
+	failTransfer atomic.Bool
 }
 
 func newMockCircleServer(t *testing.T, key *rsa.PrivateKey) (*mockCircleServer, *httptest.Server) {
@@ -215,12 +231,21 @@ func newMockCircleServer(t *testing.T, key *rsa.PrivateKey) (*mockCircleServer, 
 			t.Error("missing entitySecretCiphertext in request")
 		}
 		if len(body.Amounts) > 0 {
+			m.transferAmountMu.Lock()
 			m.transferAmount = body.Amounts[0]
+			m.transferAmountMu.Unlock()
+		}
+		if m.failTransfer.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			// Real transaction ids observed from live Circle calls are UUIDs;
-			// txn-live-<n> here is just a distinguishable mock value.
-			"data": map[string]string{"id": fmt.Sprintf("txn-live-%d", m.transferCalls), "state": "PENDING"},
+			// txn-live-<n> here is just a distinguishable mock value. Read via
+			// atomic.LoadInt32 (not a plain field read) — concurrent transfers
+			// for DIFFERENT booking_refs can hit this handler on separate
+			// goroutines at once (see TestCircleSettleAggregateCapUnderConcurrentDifferentBookingRefs).
+			"data": map[string]string{"id": fmt.Sprintf("txn-live-%d", atomic.LoadInt32(&m.transferCalls)), "state": "PENDING"},
 		})
 	})
 	return m, httptest.NewServer(mux)
@@ -241,10 +266,11 @@ func TestCircleSettleHappyPathAgainstMockServer(t *testing.T) {
 
 	st := newStore()
 	cfg := circleConfig{
-		APIKey:           "test-api-key",
-		EntitySecretHex:  testEntitySecretHex,
-		SourceWalletID:   "src-wallet",
-		MerchantWalletID: "dst-wallet",
+		APIKey:            "test-api-key",
+		EntitySecretHex:   testEntitySecretHex,
+		SourceWalletID:    "src-wallet",
+		MerchantWalletID:  "dst-wallet",
+		AggregateCapCents: testCircleAggregateCapCents,
 	}
 
 	rec, attempted, err := st.circleSettle(cfg, "BR-42", 5000)
@@ -297,6 +323,7 @@ func TestCircleSettleRejectsAmountMismatchOnReplay(t *testing.T) {
 	cfg := circleConfig{
 		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
 		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: testCircleAggregateCapCents,
 	}
 	if _, attempted, err := st.circleSettle(cfg, "BR-mismatch", 5000); !attempted || err != nil {
 		t.Fatalf("initial settle: attempted=%v err=%v", attempted, err)
@@ -328,6 +355,7 @@ func TestCircleSettleConcurrentSameBookingRefSingleTransfer(t *testing.T) {
 	cfg := circleConfig{
 		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
 		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: testCircleAggregateCapCents,
 	}
 
 	const n = 8
@@ -768,6 +796,591 @@ func TestCheckCircleStartupSafety(t *testing.T) {
 			}
 			if !c.wantErr && err != nil {
 				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
+
+// ===== NEW-4: aggregate spend ceiling ======================================
+
+// TestCircleSettleAggregateCapBlocksSecondBooking proves the reservation
+// closes the check-then-increment race window: a second booking that would
+// push cumulative outflow past the cap is refused, and the refused attempt
+// consumes no headroom of its own.
+func TestCircleSettleAggregateCapBlocksSecondBooking(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 7500,
+	}
+
+	if _, attempted, err := st.circleSettle(cfg, "BR-a", 5000); !attempted || err != nil {
+		t.Fatalf("first settle: attempted=%v err=%v", attempted, err)
+	}
+	_, attempted, err := st.circleSettle(cfg, "BR-b", 5000)
+	if !attempted {
+		t.Fatal("expected attempted=true (a cap refusal is a config-driven error, not an unconfigured short-circuit)")
+	}
+	var capErr *circleCapExceededError
+	if !errors.As(err, &capErr) {
+		t.Fatalf("expected *circleCapExceededError, got %v", err)
+	}
+	if capErr.SettledCents != 5000 || capErr.CapCents != 7500 {
+		t.Fatalf("unexpected error fields: %+v", capErr)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("expected exactly 1 transfer call, got %d", mock.transferCalls)
+	}
+	_, total := st.circleSummary()
+	if total != 5000 {
+		t.Fatalf("expected summary total 5000, got %d", total)
+	}
+	if got := st.circleCommitted(); got != 5000 {
+		t.Fatalf("expected circleCommitted()==5000 (refused attempt reserved nothing), got %d", got)
+	}
+}
+
+// TestCircleSettleAggregateCapExactBoundaryAllowed proves the cap is
+// inclusive: a settlement that exactly fills it succeeds.
+func TestCircleSettleAggregateCapExactBoundaryAllowed(t *testing.T) {
+	key := mustTestRSAKey(t)
+	_, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 5000,
+	}
+	if _, attempted, err := st.circleSettle(cfg, "BR-exact", 5000); !attempted || err != nil {
+		t.Fatalf("boundary settle should succeed (cap is inclusive): attempted=%v err=%v", attempted, err)
+	}
+	_, attempted, err := st.circleSettle(cfg, "BR-over", 1)
+	var capErr *circleCapExceededError
+	if !attempted || !errors.As(err, &capErr) {
+		t.Fatalf("expected a cap error for the 1-cent overage: attempted=%v err=%v", attempted, err)
+	}
+}
+
+// TestCircleSettleAggregateCapNotDoubleCountedOnReplay proves an idempotent
+// replay of an already-settled booking_ref consumes no additional headroom.
+func TestCircleSettleAggregateCapNotDoubleCountedOnReplay(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 10000,
+	}
+	if _, attempted, err := st.circleSettle(cfg, "BR-a", 6000); !attempted || err != nil {
+		t.Fatalf("initial settle: attempted=%v err=%v", attempted, err)
+	}
+	if _, attempted, err := st.circleSettle(cfg, "BR-a", 6000); !attempted || err != nil {
+		t.Fatalf("replay: attempted=%v err=%v", attempted, err)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("replay must not hit the network again, got %d calls", mock.transferCalls)
+	}
+	if got := st.circleCommitted(); got != 6000 {
+		t.Fatalf("expected circleCommitted()==6000 after replay, got %d", got)
+	}
+	// Proves the replay consumed no additional headroom: a fresh booking that
+	// only fits if BR-a's replay was free must still succeed.
+	if _, attempted, err := st.circleSettle(cfg, "BR-b", 4000); !attempted || err != nil {
+		t.Fatalf("BR-b settle should succeed: attempted=%v err=%v", attempted, err)
+	}
+	_, attempted, err := st.circleSettle(cfg, "BR-c", 1)
+	var capErr *circleCapExceededError
+	if !attempted || !errors.As(err, &capErr) {
+		t.Fatalf("expected BR-c to hit the now-exhausted cap: attempted=%v err=%v", attempted, err)
+	}
+}
+
+// TestCircleSettleFailedTransferDoesNotConsumeCap proves a failed upstream
+// attempt releases its reservation rather than permanently consuming headroom.
+func TestCircleSettleFailedTransferDoesNotConsumeCap(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 5000,
+	}
+	mock.failTransfer.Store(true)
+	if _, attempted, err := st.circleSettle(cfg, "BR-fail", 5000); !attempted || err == nil {
+		t.Fatalf("expected an error from the failed transfer: attempted=%v err=%v", attempted, err)
+	}
+	if got := st.circleCommitted(); got != 0 {
+		t.Fatalf("expected circleCommitted()==0 after a failed transfer (reservation released), got %d", got)
+	}
+	mock.failTransfer.Store(false)
+	if _, attempted, err := st.circleSettle(cfg, "BR-ok", 5000); !attempted || err != nil {
+		t.Fatalf("expected the retry to succeed once headroom was released: attempted=%v err=%v", attempted, err)
+	}
+}
+
+// TestCircleSettleUnconfiguredDoesNotConsumeCap proves the unconfigured
+// short-circuit (no HTTP call at all) never touches the aggregate counter.
+func TestCircleSettleUnconfiguredDoesNotConsumeCap(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	unconfigured := circleConfig{AggregateCapCents: 5000} // cap set, but no credentials
+	rec, attempted, err := st.circleSettle(unconfigured, "BR-x", 5000)
+	if attempted {
+		t.Fatal("expected attempted=false for an unconfigured rail")
+	}
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if rec != (circleSettlement{}) {
+		t.Fatalf("expected zero-value settlement, got %+v", rec)
+	}
+	if got := st.circleCommitted(); got != 0 {
+		t.Fatalf("expected circleCommitted()==0, got %d", got)
+	}
+
+	configured := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 5000,
+	}
+	if _, attempted, err := st.circleSettle(configured, "BR-y", 5000); !attempted || err != nil {
+		t.Fatalf("configured settle should succeed: attempted=%v err=%v", attempted, err)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("expected exactly 1 transfer call, got %d", mock.transferCalls)
+	}
+}
+
+// TestCircleSettleZeroCapBlocksEverything proves AggregateCapCents==0 is a
+// kill switch: a credentialed, otherwise-working rail settles nothing.
+func TestCircleSettleZeroCapBlocksEverything(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 0,
+	}
+	_, attempted, err := st.circleSettle(cfg, "BR-zero", 5000)
+	var capErr *circleCapExceededError
+	if !attempted || !errors.As(err, &capErr) {
+		t.Fatalf("expected a cap error even for a nonzero amount against a 0 cap: attempted=%v err=%v", attempted, err)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 0 {
+		t.Fatalf("expected no transfer call, got %d", mock.transferCalls)
+	}
+}
+
+// TestCircleSettleAggregateCapUnderConcurrentDifferentBookingRefs is the key
+// concurrency test: N concurrent settles for N DIFFERENT booking_refs must
+// not collectively overshoot the cap. A check-then-increment implementation
+// (rather than reserve-then-commit) fails this test — that is its whole
+// purpose. Run with -race.
+func TestCircleSettleAggregateCapUnderConcurrentDifferentBookingRefs(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 20000,
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, err := st.circleSettle(cfg, fmt.Sprintf("BR-cap-%d", i), 5000)
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	var okCount, capCount int
+	for _, err := range errs {
+		var capErr *circleCapExceededError
+		switch {
+		case err == nil:
+			okCount++
+		case errors.As(err, &capErr):
+			capCount++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if okCount != 4 || capCount != 4 {
+		t.Fatalf("expected 4 successes and 4 cap refusals (cap 20000 / 5000 per booking), got %d ok, %d cap", okCount, capCount)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 4 {
+		t.Fatalf("expected exactly 4 transfer calls, got %d", mock.transferCalls)
+	}
+	_, total := st.circleSummary()
+	if total != 20000 {
+		t.Fatalf("expected summary total 20000, got %d", total)
+	}
+	if got := st.circleCommitted(); got != 20000 {
+		t.Fatalf("expected circleCommitted()==20000, got %d", got)
+	}
+}
+
+// TestCircleSettleCommittedMatchesSummaryWhenQuiescent asserts the stated
+// invariant (circleSettle's doc comment on circleCommittedCents): once no
+// settle is in flight, circleCommitted() equals the sum of recorded
+// settlements — after a mix of successes, a failure, a replay, and a cap
+// refusal.
+func TestCircleSettleCommittedMatchesSummaryWhenQuiescent(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	st := newStore()
+	cfg := circleConfig{
+		APIKey: "test-api-key", EntitySecretHex: testEntitySecretHex,
+		SourceWalletID: "src-wallet", MerchantWalletID: "dst-wallet",
+		AggregateCapCents: 100000,
+	}
+
+	// 2 successes.
+	if _, attempted, err := st.circleSettle(cfg, "BR-1", 1000); !attempted || err != nil {
+		t.Fatalf("BR-1: attempted=%v err=%v", attempted, err)
+	}
+	if _, attempted, err := st.circleSettle(cfg, "BR-2", 2000); !attempted || err != nil {
+		t.Fatalf("BR-2: attempted=%v err=%v", attempted, err)
+	}
+	// 1 failure (transfer rejected upstream).
+	mock.failTransfer.Store(true)
+	if _, attempted, err := st.circleSettle(cfg, "BR-3", 3000); !attempted || err == nil {
+		t.Fatalf("BR-3 should fail: attempted=%v err=%v", attempted, err)
+	}
+	mock.failTransfer.Store(false)
+	// 1 replay.
+	if _, attempted, err := st.circleSettle(cfg, "BR-1", 1000); !attempted || err != nil {
+		t.Fatalf("BR-1 replay: attempted=%v err=%v", attempted, err)
+	}
+	// 1 cap refusal (well beyond remaining headroom).
+	_, attempted, err := st.circleSettle(cfg, "BR-4", 200000)
+	var capErr *circleCapExceededError
+	if !attempted || !errors.As(err, &capErr) {
+		t.Fatalf("BR-4 should be cap-refused: attempted=%v err=%v", attempted, err)
+	}
+
+	_, total := st.circleSummary()
+	if got := st.circleCommitted(); got != int64(total) {
+		t.Fatalf("invariant violated: circleCommitted()=%d != summary total=%d", got, total)
+	}
+}
+
+// TestCircleAdminHandlerRejectsWhenAggregateCapExhausted proves the admin
+// entry point returns 403 exceeds_circle_aggregate_cap, with numbers, once
+// the cumulative ceiling is exhausted — and that the refused POST never
+// reaches the transfer endpoint.
+func TestCircleAdminHandlerRejectsWhenAggregateCapExhausted(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	t.Setenv("CIRCLE_API_KEY", "test-api-key")
+	t.Setenv("CIRCLE_ENTITY_SECRET", testEntitySecretHex)
+	t.Setenv("CIRCLE_SOURCE_WALLET_ID", "src-wallet")
+	t.Setenv("CIRCLE_MERCHANT_WALLET_ID", "dst-wallet")
+	// circleAdminHandler calls loadCircleConfig() at CONSTRUCTION time, so this
+	// must be set before the handler below is built.
+	t.Setenv("CIRCLE_AGGREGATE_CAP_USD", "50.00") // 5000 cents
+
+	st := newStore()
+	h := circleAdminHandler(st, testBudgetHardMaxCents)
+
+	w1 := httptest.NewRecorder()
+	h(w1, httptest.NewRequest("POST", "/admin/circle/settle",
+		strings.NewReader(`{"booking_ref":"BR-1","total_cents":5000}`)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first settle: HTTP %d: %s", w1.Code, w1.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	h(w2, httptest.NewRequest("POST", "/admin/circle/settle",
+		strings.NewReader(`{"booking_ref":"BR-2","total_cents":5000}`)))
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w2.Code, w2.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response json: %v", err)
+	}
+	if resp["error"] != "exceeds_circle_aggregate_cap" {
+		t.Fatalf("unexpected error field: %v", resp)
+	}
+	if got := int64(resp["aggregate_cap_cents"].(float64)); got != 5000 {
+		t.Fatalf("unexpected aggregate_cap_cents: %v", got)
+	}
+	if got := int64(resp["settled_cents"].(float64)); got != 5000 {
+		t.Fatalf("unexpected settled_cents: %v", got)
+	}
+	if got := int64(resp["requested_cents"].(float64)); got != 5000 {
+		t.Fatalf("unexpected requested_cents: %v", got)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("second POST must not have increased transferCalls, got %d", mock.transferCalls)
+	}
+}
+
+// TestCircleAdminHandlerGetSummaryReportsAggregateCap proves the GET summary
+// carries aggregate_cap_cents/aggregate_committed_cents/aggregate_remaining_cents,
+// and that remaining floors at 0 rather than going negative.
+func TestCircleAdminHandlerGetSummaryReportsAggregateCap(t *testing.T) {
+	key := mustTestRSAKey(t)
+	_, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	t.Setenv("CIRCLE_API_KEY", "test-api-key")
+	t.Setenv("CIRCLE_ENTITY_SECRET", testEntitySecretHex)
+	t.Setenv("CIRCLE_SOURCE_WALLET_ID", "src-wallet")
+	t.Setenv("CIRCLE_MERCHANT_WALLET_ID", "dst-wallet")
+	t.Setenv("CIRCLE_AGGREGATE_CAP_USD", "200.00") // 20000 cents
+
+	st := newStore()
+	h := circleAdminHandler(st, testBudgetHardMaxCents)
+
+	w1 := httptest.NewRecorder()
+	h(w1, httptest.NewRequest("POST", "/admin/circle/settle",
+		strings.NewReader(`{"booking_ref":"BR-1","total_cents":5000}`)))
+	if w1.Code != http.StatusOK {
+		t.Fatalf("settle: HTTP %d: %s", w1.Code, w1.Body.String())
+	}
+
+	w2 := httptest.NewRecorder()
+	h(w2, httptest.NewRequest("GET", "/admin/circle/settle", nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("GET: HTTP %d", w2.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response json: %v", err)
+	}
+	if got := int64(resp["aggregate_cap_cents"].(float64)); got != 20000 {
+		t.Fatalf("unexpected aggregate_cap_cents: %v", got)
+	}
+	if got := int64(resp["aggregate_committed_cents"].(float64)); got != 5000 {
+		t.Fatalf("unexpected aggregate_committed_cents: %v", got)
+	}
+	if got := int64(resp["aggregate_remaining_cents"].(float64)); got != 15000 {
+		t.Fatalf("unexpected aggregate_remaining_cents: %v", got)
+	}
+
+	// Floor check: a fresh store/handler with cap 0 must report
+	// aggregate_remaining_cents==0, never negative.
+	st2 := newStore()
+	t.Setenv("CIRCLE_AGGREGATE_CAP_USD", "0")
+	h2 := circleAdminHandler(st2, testBudgetHardMaxCents)
+	w3 := httptest.NewRecorder()
+	h2(w3, httptest.NewRequest("GET", "/admin/circle/settle", nil))
+	var resp2 map[string]any
+	if err := json.Unmarshal(w3.Body.Bytes(), &resp2); err != nil {
+		t.Fatalf("response json: %v", err)
+	}
+	if got := int64(resp2["aggregate_remaining_cents"].(float64)); got != 0 {
+		t.Fatalf("expected remaining to floor at 0, got %v", got)
+	}
+}
+
+// TestCompleteCheckoutAggregateCapBlocksSecondBookingEndToEnd is the one that
+// proves the agent-driven path is covered: through dispatchTool itself (the
+// exact function /api/ucp/mcp calls in production), a first booking exhausts
+// the aggregate cap and a second, otherwise-identical booking still COMPLETES
+// (the booking commits) but carries a cap-refusal circle_settlement with no
+// transaction_id — and the agent-facing map does not leak the cap numbers
+// (§5's deliberate asymmetry vs. the admin path).
+func TestCompleteCheckoutAggregateCapBlocksSecondBookingEndToEnd(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	t.Setenv("CIRCLE_API_KEY", "test-api-key")
+	t.Setenv("CIRCLE_ENTITY_SECRET", testEntitySecretHex)
+	t.Setenv("CIRCLE_SOURCE_WALLET_ID", "src-wallet")
+	t.Setenv("CIRCLE_MERCHANT_WALLET_ID", "dst-wallet")
+	t.Setenv("CIRCLE_AGGREGATE_CAP_USD", "330.00") // 33000 cents — exactly one booking's worth
+
+	st := newStore()
+
+	d, code := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name: "create_checkout",
+		Arguments: coArgs(map[string]any{
+			"user_id":         "u1",
+			"line_items":      []map[string]any{li("bali-alaya-ubud", "2026-07-01", "2026-07-03")},
+			"settlement_rail": "circle_usdc",
+		}),
+	})
+	if code != http.StatusOK || d["status"] != "incomplete" {
+		t.Fatalf("create_checkout: %v", d)
+	}
+	cid := d["id"].(string)
+	dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "update_checkout",
+		Arguments: coArgs(map[string]any{"id": cid, "buyer_consent": true}),
+	})
+	resp, code2 := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "complete_checkout",
+		Arguments: coArgs(map[string]any{"id": cid}),
+	})
+	if code2 != http.StatusOK || resp["status"] != "complete" {
+		t.Fatalf("first complete_checkout: %v", resp)
+	}
+	settlement, ok := resp["circle_settlement"].(map[string]any)
+	if !ok || settlement["transaction_id"] == "" || settlement["transaction_id"] == nil {
+		t.Fatalf("expected a real transaction_id on the first booking, got %v", resp)
+	}
+
+	d2, code3 := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name: "create_checkout",
+		Arguments: coArgs(map[string]any{
+			"user_id":         "u1",
+			"line_items":      []map[string]any{li("bali-alaya-ubud", "2026-07-01", "2026-07-03")},
+			"settlement_rail": "circle_usdc",
+		}),
+	})
+	if code3 != http.StatusOK {
+		t.Fatalf("create_checkout #2: %v", d2)
+	}
+	cid2 := d2["id"].(string)
+	dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "update_checkout",
+		Arguments: coArgs(map[string]any{"id": cid2, "buyer_consent": true}),
+	})
+	resp2, code4 := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "complete_checkout",
+		Arguments: coArgs(map[string]any{"id": cid2}),
+	})
+	if code4 != http.StatusOK || resp2["status"] != "complete" {
+		t.Fatalf("second complete_checkout should still commit the booking: %v", resp2)
+	}
+	settlement2, ok := resp2["circle_settlement"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected circle_settlement on the second booking too, got %v", resp2)
+	}
+	if settlement2["error"] != "exceeds_circle_aggregate_cap" {
+		t.Fatalf("expected exceeds_circle_aggregate_cap, got %v", settlement2)
+	}
+	if _, has := settlement2["transaction_id"]; has {
+		t.Fatalf("cap-refused settlement must not carry a transaction_id: %v", settlement2)
+	}
+	// Locks in the deliberate asymmetry (§5): the agent-facing map carries no numbers.
+	if _, has := settlement2["aggregate_cap_cents"]; has {
+		t.Fatalf("agent-facing circle_settlement must not carry aggregate_cap_cents: %v", settlement2)
+	}
+	if _, has := settlement2["settled_cents"]; has {
+		t.Fatalf("agent-facing circle_settlement must not carry settled_cents: %v", settlement2)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("expected exactly 1 real transfer call total, got %d", mock.transferCalls)
+	}
+}
+
+// TestLoadCircleConfigAggregateCap asserts the full §3 semantics table:
+// unset -> default; parsed dollars -> cents; unparseable -> default (never
+// unbounded); zero -> kill switch; negative -> clamped to zero.
+func TestLoadCircleConfigAggregateCap(t *testing.T) {
+	cases := []struct {
+		name   string
+		setEnv bool
+		envVal string
+		want   int64
+	}{
+		{"unset -> built-in $10,000 default, NOT unbounded", false, "", 1000000},
+		{"parsed dollars-and-cents", true, "250.50", 25050},
+		{"unparseable falls back to the default, not unbounded", true, "abc", 1000000},
+		{"zero is a kill switch", true, "0", 0},
+		{"negative clamps to zero", true, "-5", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.setEnv {
+				t.Setenv("CIRCLE_AGGREGATE_CAP_USD", c.envVal)
+			} else {
+				t.Setenv("CIRCLE_AGGREGATE_CAP_USD", "") // explicitly unset relative to outer env
+			}
+			cfg := loadCircleConfig()
+			if cfg.AggregateCapCents != c.want {
+				t.Fatalf("AggregateCapCents = %d, want %d", cfg.AggregateCapCents, c.want)
 			}
 		})
 	}

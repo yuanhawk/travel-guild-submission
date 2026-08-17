@@ -104,8 +104,16 @@ func main() {
 	// just to report build provenance (mirrors server.py's _GIT_SHA).
 	gitSHA = resolveGitSHA(os.Getenv)
 	cfg := loadConfig()
-	if err := checkCircleStartupSafety(cfg, loadCircleConfig()); err != nil {
+	circleCfg := loadCircleConfig()
+	if err := checkCircleStartupSafety(cfg, circleCfg); err != nil {
 		log.Fatal(err)
+	}
+	if circleCfg.configured() {
+		if circleCfg.AggregateCapCents == 0 {
+			log.Printf("WARNING: Circle rail is credentialed but CIRCLE_AGGREGATE_CAP_USD resolves to 0¢ — every settlement will be refused")
+		} else {
+			log.Printf("circle_usdc rail ENABLED (network %s, aggregate cap %d¢ for this process lifetime)", circleNetwork, circleCfg.AggregateCapCents)
+		}
 	}
 	st := newStore()
 	mk, loaded := loadOrCreateKey()
