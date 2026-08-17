@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // testBudgetHardMaxCents mirrors the default BUDGET_HARD_MAX_USD ($2000) used
@@ -248,6 +249,18 @@ func newMockCircleServer(t *testing.T, key *rsa.PrivateKey) (*mockCircleServer, 
 			"data": map[string]string{"id": fmt.Sprintf("txn-live-%d", atomic.LoadInt32(&m.transferCalls)), "state": "PENDING"},
 		})
 	})
+	mux.HandleFunc("/transactions/", func(w http.ResponseWriter, r *http.Request) {
+		// The mock transfer response above always has a hash available on the
+		// very first poll — real Circle sometimes needs a few tries (see
+		// TestPollTxHashRetriesUntilHashAppears for that case, tested against
+		// pollTxHash directly rather than through this shared server).
+		writeJSON(w, http.StatusOK, map[string]any{
+			"data": map[string]any{
+				"state":  "SENT",
+				"txHash": "0xmocktxhash000000000000000000000000000000000000000000000000000",
+			},
+		})
+	})
 	return m, httptest.NewServer(mux)
 }
 
@@ -280,8 +293,18 @@ func TestCircleSettleHappyPathAgainstMockServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("circleSettle: %v", err)
 	}
-	if rec.Status != "PENDING" || rec.TransactionID == "" {
+	// Status is "SENT" (not the transfer response's initial "PENDING") because
+	// the follow-up /transactions/{id} poll's state, when present, is the more
+	// current truth — see circleSettle's "status := parsed.Data.State ... if
+	// polledState != ''" logic.
+	if rec.Status != "SENT" || rec.TransactionID == "" {
 		t.Fatalf("unexpected settlement record: %+v", rec)
+	}
+	if rec.TxHash == "" {
+		t.Fatal("expected a tx_hash populated from the /transactions/{id} poll")
+	}
+	if got, want := blockExplorerURL(rec.TxHash), "https://sepolia.etherscan.io/tx/"+rec.TxHash; got != want {
+		t.Fatalf("blockExplorerURL: got %q want %q", got, want)
 	}
 	if mock.transferAmount != "50.00" {
 		t.Fatalf("unexpected amount sent to Circle: %q (want 50.00 for 5000 cents)", mock.transferAmount)
@@ -767,6 +790,144 @@ func TestResolveUSDCTokenIDBalancesNon200(t *testing.T) {
 	cfg := circleConfig{APIKey: "test-api-key", SourceWalletID: "bad-wallet"}
 	if _, err := resolveUSDCTokenID(cfg); err == nil {
 		t.Fatal("expected error on non-200 balances response, got nil")
+	}
+}
+
+// Real Circle behavior (per the module header's live-verified note): the
+// initial transfer response never carries a tx hash — it shows up only once
+// polled, and sometimes not on the very first poll. Simulate a hash that
+// only appears on the 3rd attempt.
+func TestPollTxHashRetriesUntilHashAppears(t *testing.T) {
+	var calls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/transactions/txn-slow", func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n < 3 {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]string{"state": "PENDING", "txHash": ""}})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]string{"state": "SENT", "txHash": "0xfoundit"}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	origInterval := circlePollInterval
+	circlePollInterval = 1 * time.Millisecond // keep the test fast
+	defer func() { circlePollInterval = origInterval }()
+
+	cfg := circleConfig{APIKey: "test-api-key"}
+	hash, state := pollTxHash(cfg, "txn-slow")
+	if hash != "0xfoundit" {
+		t.Fatalf("expected hash 0xfoundit, got %q (state=%q, calls=%d)", hash, state, calls)
+	}
+	if state != "SENT" {
+		t.Fatalf("expected final state SENT, got %q", state)
+	}
+	if calls != 3 {
+		t.Fatalf("expected exactly 3 attempts, got %d", calls)
+	}
+}
+
+// A terminal state with no hash (e.g. the transfer failed after submission)
+// must stop polling immediately rather than exhausting all attempts.
+func TestPollTxHashStopsOnTerminalStateWithoutHash(t *testing.T) {
+	var calls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/transactions/txn-failed", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]string{"state": "FAILED", "txHash": ""}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	origInterval := circlePollInterval
+	circlePollInterval = 1 * time.Millisecond
+	defer func() { circlePollInterval = origInterval }()
+
+	cfg := circleConfig{APIKey: "test-api-key"}
+	hash, state := pollTxHash(cfg, "txn-failed")
+	if hash != "" {
+		t.Fatalf("expected no hash for a failed transaction, got %q", hash)
+	}
+	if state != "FAILED" {
+		t.Fatalf("expected state FAILED, got %q", state)
+	}
+	if calls != 1 {
+		t.Fatalf("expected polling to stop after 1 attempt on a terminal state, got %d calls", calls)
+	}
+}
+
+// A hash that never appears (and never reaches a terminal state) must not
+// hang forever — pollTxHash must give up after circlePollMaxAttempts.
+func TestPollTxHashGivesUpAfterMaxAttempts(t *testing.T) {
+	var calls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/transactions/txn-stuck", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]string{"state": "PENDING", "txHash": ""}})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	origInterval := circlePollInterval
+	circlePollInterval = 1 * time.Millisecond
+	defer func() { circlePollInterval = origInterval }()
+
+	cfg := circleConfig{APIKey: "test-api-key"}
+	hash, state := pollTxHash(cfg, "txn-stuck")
+	if hash != "" {
+		t.Fatalf("expected no hash, got %q", hash)
+	}
+	if state != "PENDING" {
+		t.Fatalf("expected last-seen state PENDING, got %q", state)
+	}
+	if calls != circlePollMaxAttempts {
+		t.Fatalf("expected exactly circlePollMaxAttempts=%d attempts, got %d", circlePollMaxAttempts, calls)
+	}
+}
+
+func TestPollTxHashNonOKStatusReturnsEmpty(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/transactions/txn-500", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	cfg := circleConfig{APIKey: "test-api-key"}
+	hash, state := pollTxHash(cfg, "txn-500")
+	if hash != "" || state != "" {
+		t.Fatalf("expected empty hash/state on non-200, got hash=%q state=%q", hash, state)
+	}
+}
+
+func TestBlockExplorerURL(t *testing.T) {
+	if got := blockExplorerURL(""); got != "" {
+		t.Fatalf("expected empty URL for empty tx hash, got %q", got)
+	}
+	const hash = "0xabc123"
+	if got, want := blockExplorerURL(hash), "https://sepolia.etherscan.io/tx/"+hash; got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }
 

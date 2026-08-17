@@ -108,13 +108,32 @@ const (
 	circleAggregateCapNote = "this settlement was refused because it would push the Circle rail's " +
 		"cumulative settled total past CIRCLE_AGGREGATE_CAP_USD — the process-lifetime ceiling on " +
 		"total USDC this rail may move across ALL bookings. No transfer was made."
+
+	// circlePollMaxAttempts bounds the follow-up poll for the on-chain tx hash
+	// (see pollTxHash) — the transfer has already succeeded by this point, so
+	// this is a best-effort enrichment, never a reason to fail or hang the
+	// request.
+	circlePollMaxAttempts = 5
 )
+
+// circlePollInterval is a var (not a const) so tests can shrink it —
+// production always uses the 2s default set below.
+var circlePollInterval = 2 * time.Second
 
 type circleSettlement struct {
 	BookingRef    string `json:"booking_ref"`
 	TotalCents    int    `json:"total_cents"`
-	TransactionID string `json:"transaction_id"`
+	TransactionID string `json:"transaction_id"` // Circle's own internal transaction UUID — NOT an on-chain hash
 	Status        string `json:"status"`
+	// TxHash is the real on-chain transaction hash, needed for a genuine
+	// clickable block-explorer link. NOT present in the initial transfer
+	// response (confirmed live: POST /developer/transactions/transfer returns
+	// only id+state) — populated by a bounded follow-up poll of
+	// GET /transactions/{id}, see pollTxHash. May be "" if the transfer hasn't
+	// been broadcast on-chain yet by the time polling gives up; callers should
+	// treat an empty TxHash as "not yet available", not as an error — the
+	// transfer itself already succeeded (TransactionID is set).
+	TxHash string `json:"tx_hash,omitempty"`
 }
 
 // circleConfig is read once from the environment. All four must be set for the
@@ -507,17 +526,79 @@ func (st *store) circleSettle(cfg circleConfig, bookingRef string, totalCents in
 		return circleSettlement{}, true, fmt.Errorf("parsing circle transfer response: %w", err)
 	}
 
+	// Best-effort: the on-chain tx hash isn't in the transfer response yet
+	// (confirmed live), only appearing once Circle's indexer picks it up. A
+	// bounded poll, not a hard requirement — the transfer itself already
+	// succeeded regardless of whether this finds a hash in time.
+	txHash, polledState := pollTxHash(cfg, parsed.Data.ID)
+	status := parsed.Data.State
+	if polledState != "" {
+		status = polledState
+	}
+
 	rec := circleSettlement{
 		BookingRef:    bookingRef,
 		TotalCents:    totalCents,
 		TransactionID: parsed.Data.ID,
-		Status:        parsed.Data.State,
+		Status:        status,
+		TxHash:        txHash,
 	}
 	st.mu.Lock()
 	st.circleSettlements[bookingRef] = rec
 	committed = true // reservation becomes a settlement; the defer must not release it
 	st.mu.Unlock()
 	return rec, true, nil
+}
+
+// circleTerminalStates are the transaction states after which further
+// polling cannot change the outcome (per Circle's documented lifecycle).
+var circleTerminalStates = map[string]bool{
+	"COMPLETE": true, "FAILED": true, "DENIED": true, "CANCELLED": true,
+}
+
+// pollTxHash polls GET /v1/w3s/transactions/{id} for the on-chain tx hash,
+// stopping as soon as one appears or a terminal state is reached, whichever
+// first — bounded to circlePollMaxAttempts tries so a slow/never-appearing
+// hash can never hang a settlement request indefinitely. Returns ("", "") on
+// any failure (network error, bad status, bad JSON) — this is explicitly
+// non-fatal to the caller, which already has a successful transfer.
+func pollTxHash(cfg circleConfig, transactionID string) (txHash string, lastState string) {
+	for i := 0; i < circlePollMaxAttempts; i++ {
+		if i > 0 {
+			time.Sleep(circlePollInterval)
+		}
+		req, err := http.NewRequest(http.MethodGet, circleBaseURL+"/transactions/"+url.PathEscape(transactionID), nil)
+		if err != nil {
+			return "", ""
+		}
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		resp, err := circleHTTPClient.Do(req)
+		if err != nil {
+			return "", ""
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", ""
+		}
+		var out struct {
+			Data struct {
+				State  string `json:"state"`
+				TxHash string `json:"txHash"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &out); err != nil {
+			return "", ""
+		}
+		lastState = out.Data.State
+		if out.Data.TxHash != "" {
+			return out.Data.TxHash, lastState
+		}
+		if circleTerminalStates[out.Data.State] {
+			return "", lastState
+		}
+	}
+	return "", lastState
 }
 
 func (st *store) circleSummary() (recs []circleSettlement, total int) {
@@ -597,14 +678,37 @@ func maybeCircleSettle(st *store, resp map[string]any) map[string]any {
 		}
 	default:
 		resp["circle_settlement"] = map[string]any{
-			"transaction_id": rec.TransactionID,
-			"status":         rec.Status,
-			"rail":           "circle_usdc_testnet",
-			"network":        circleNetwork,
-			"note":           circleNote,
+			"transaction_id":     rec.TransactionID,
+			"status":             rec.Status,
+			"tx_hash":            rec.TxHash,
+			"block_explorer_url": blockExplorerURL(rec.TxHash),
+			"rail":               "circle_usdc_testnet",
+			"network":            circleNetwork,
+			"note":               circleNote,
 		}
 	}
 	return resp
+}
+
+// blockExplorerURL builds a clickable block-explorer link for the configured
+// network. Returns "" when txHash is empty (e.g. pollTxHash gave up before
+// the hash appeared) — callers must not construct a link to a blank hash.
+func blockExplorerURL(txHash string) string {
+	if txHash == "" {
+		return ""
+	}
+	base, ok := circleBlockExplorerBase[circleNetwork]
+	if !ok {
+		return ""
+	}
+	return base + txHash
+}
+
+// circleBlockExplorerBase maps each supported network to its block-explorer
+// tx-URL prefix. Only ETH-SEPOLIA is wired up today (circleNetwork's only
+// current value) — extend this map before changing circleNetwork.
+var circleBlockExplorerBase = map[string]string{
+	"ETH-SEPOLIA": "https://sepolia.etherscan.io/tx/",
 }
 
 // circleAdminHandler wires the Circle rail's HTTP surface. budgetHardMaxCents
@@ -692,13 +796,15 @@ func circleAdminHandler(st *store, budgetHardMaxCents int64) http.HandlerFunc {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{
-				"transaction_id": rec.TransactionID,
-				"status":         rec.Status,
-				"booking_ref":    rec.BookingRef,
-				"total_cents":    rec.TotalCents,
-				"rail":           "circle_usdc_testnet",
-				"network":        circleNetwork,
-				"note":           circleNote,
+				"transaction_id":     rec.TransactionID,
+				"status":             rec.Status,
+				"tx_hash":            rec.TxHash,
+				"block_explorer_url": blockExplorerURL(rec.TxHash),
+				"booking_ref":        rec.BookingRef,
+				"total_cents":        rec.TotalCents,
+				"rail":               "circle_usdc_testnet",
+				"network":            circleNetwork,
+				"note":               circleNote,
 			})
 		default:
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
