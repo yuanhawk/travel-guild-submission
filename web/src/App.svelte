@@ -772,8 +772,19 @@ import { placeSheetOpen } from './lib/mapStore';
           {/if}
         </div>
       {/if}
+      {#if settleWithCircle}
+        <div class="circle-consent-notice" data-testid="circle-consent-notice">
+          💰 <b>Confirming will fire a REAL USDC transfer</b> on Ethereum Sepolia
+          testnet via Circle — not simulated. This is the same one consent below;
+          nothing further will ask you to confirm the on-chain part separately.
+        </div>
+      {/if}
       <button class="confirm" data-testid="confirm-book" on:click={confirmBook} disabled={confirming || !tripHasDates}>
-        {confirming ? 'Booking…' : `✓ Confirm & Book ${centsToUsd(chargeAmount(result))} to wallet`}
+        {confirming
+          ? 'Booking…'
+          : settleWithCircle
+            ? `✓ Confirm & Book ${centsToUsd(chargeAmount(result))} — settle with real USDC`
+            : `✓ Confirm & Book ${centsToUsd(chargeAmount(result))} to wallet`}
       </button>
       {#if !tripHasDates}
         <div class="date-required-note" data-testid="date-required-note">📅 Set your trip dates above before booking.</div>

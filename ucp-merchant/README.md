@@ -56,6 +56,17 @@ transfer between two developer-controlled wallets on a public testnet
 transfer call, and on-chain confirmation via an independent third-party RPC
 call all completed successfully.
 
+**Proof of live settlement (Circle Agentic Economy Prize eligibility artifacts):**
+- Agent (source) Circle wallet address: `0x776244b38e4f99cd24bbecf7047be6309ffad787`
+- A real settled transaction, verifiable on-chain: [`sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61`](https://sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61)
+  (5.000000 USDC, confirmed independently via a direct `eth_getTransactionReceipt`
+  RPC call showing `status: 0x1` and a genuine ERC-20 `Transfer` event — not
+  merely Circle's own reporting).
+- Network: Ethereum Sepolia testnet (`ETH-SEPOLIA`).
+- This transaction was fired via the admin entry point during integration
+  testing; the same code path (`maybeCircleSettle`) also fires automatically
+  from a real, toggle-driven web UI booking — see the demo recording.
+
 **Two entry points**, both fail-closed by construction (see `main.go`'s
 `checkCircleStartupSafety` — the server refuses to start if the rail is
 configured without an admin token, or without required signatures when the
@@ -71,6 +82,18 @@ unsigned-caller tier grants checkout capability):
 returns an honest `CIRCLE_NOT_CONFIGURED` rather than faking a settlement):
 `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_SOURCE_WALLET_ID`,
 `CIRCLE_MERCHANT_WALLET_ID`.
+
+Startup safety refuses to boot when Circle credentials are set, signatures
+aren't required, and the unsigned tier grants checkout — because normally
+that means any unauthenticated caller could drive a real settlement. A
+narrow exemption exists for a co-located single-host demo: set
+`UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1` **and** bind `UCP_LISTEN_ADDR` to a
+loopback address (`127.0.0.1`, `::1`, or `localhost`) and startup proceeds
+with a warning. Both are required — loopback alone would silently change
+behavior for the common default config, and the flag alone can't weaken a
+public bind. This does **not** relax the admin-token requirement, and it
+only makes sense when nothing else (no reverse proxy, no forwarder) is
+routing external traffic to this port — unset the flag once you're done.
 
 Optional: `CIRCLE_AGGREGATE_CAP_USD` — the process-lifetime ceiling on the
 **total** USDC this rail may move across all bookings (default `10000`, i.e.

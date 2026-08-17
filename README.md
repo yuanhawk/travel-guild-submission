@@ -4,7 +4,7 @@
 agents with hard checks & balances on the money path, so autonomous spend is
 deterministic and bounded *by construction* — not by trusting a prompt.**
 
-*Track 3 (Agent Society) · Qwen Cloud Global AI Hackathon · AGPL-3.0 · runs cloud-free*
+*Build with Gemini XPRIZE · opted into the Circle Agentic Economy Prize bonus track · AGPL-3.0*
 
 > **Travel Guild** is the submission product name. `society/` is the internal
 > codename for the agent core and stays unchanged in the code.
@@ -32,6 +32,13 @@ deterministic and bounded *by construction* — not by trusting a prompt.**
 > **not** in the enforced budget (no GDS/OTA access) — the priced package is
 > the in-destination *bookable* package, not the full trip cost.
 
+> **Circle Agentic Economy Prize — proof of a real, live USDC settlement:**
+> agent wallet `0x776244b38e4f99cd24bbecf7047be6309ffad787`, transaction
+> [`sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61`](https://sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61)
+> (Ethereum Sepolia testnet, independently verified on-chain). Full mechanics
+> and the agent-driven (not admin-manual) entry point: `ucp-merchant/README.md`
+> § *Circle Agentic Economy Prize integration*.
+
 ---
 
 ## What it is
@@ -45,7 +52,7 @@ The contribution is **structure**, not "a bigger LLM." A single LLM agent is a
 non-deterministic, self-policing cashier: on the same feasible trip it can
 fail to book in up to ~30% of runs, hallucinate a price into a charge, or
 silently book 1 of 3 legs and call it done. Travel Guild clamps the LLM
-behind deterministic validators and an independent merchant, giving **five
+behind deterministic validators and an independent merchant, giving **six
 structural checks** no single-prompt agent has:
 
 | # | Check | How it's enforced |
@@ -55,6 +62,7 @@ structural checks** no single-prompt agent has:
 | 3 | **Can't silently partial-book** | **all-or-none** + Critic coverage gate; an incomplete package → honest `cannot_satisfy` |
 | 4 | **Can't spend without authorization** | **one human consent** per package; any swap/recovery needs fresh re-consent (the AP2 mandate binds the checkout) |
 | 5 | **Can't flake** | LLM reasoning is clamped behind deterministic validators → correctness **variance ≈ 0** across runs |
+| 6 | **Can pay for real, within bounds** | opt-in **real Circle USDC settlement** (Ethereum Sepolia) on the same enforced money path, bounded by two independent, code-level spend ceilings — see the Circle Agentic Economy Prize section below |
 
 Twelve specialist agents (Planner, Budget, Destination, Accommodation,
 Transport, Day-planner, Critic, Risk, Insurance, Visa/Compliance, Health,
