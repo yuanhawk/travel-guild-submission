@@ -83,6 +83,18 @@ returns an honest `CIRCLE_NOT_CONFIGURED` rather than faking a settlement):
 `CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_SOURCE_WALLET_ID`,
 `CIRCLE_MERCHANT_WALLET_ID`.
 
+Startup safety refuses to boot when Circle credentials are set, signatures
+aren't required, and the unsigned tier grants checkout — because normally
+that means any unauthenticated caller could drive a real settlement. A
+narrow exemption exists for a co-located single-host demo: set
+`UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1` **and** bind `UCP_LISTEN_ADDR` to a
+loopback address (`127.0.0.1`, `::1`, or `localhost`) and startup proceeds
+with a warning. Both are required — loopback alone would silently change
+behavior for the common default config, and the flag alone can't weaken a
+public bind. This does **not** relax the admin-token requirement, and it
+only makes sense when nothing else (no reverse proxy, no forwarder) is
+routing external traffic to this port — unset the flag once you're done.
+
 Optional: `CIRCLE_AGGREGATE_CAP_USD` — the process-lifetime ceiling on the
 **total** USDC this rail may move across all bookings (default `10000`, i.e.
 $10,000; `0` refuses every settlement; an unparseable value falls back to the
