@@ -1035,6 +1035,37 @@ func TestCheckCircleStartupSafety(t *testing.T) {
 		{"configured, admin token, unsigned floor L1 (safe default)", config{AdminToken: "t", RequireSignatures: false, UnsignedTier: "L1"}, configured, false},
 		{"configured, admin token, unsigned floor L2 (VULNERABLE — demo setting)", config{AdminToken: "t", RequireSignatures: false, UnsignedTier: "L2"}, configured, true},
 		{"configured, admin token, unsigned floor L3 (VULNERABLE)", config{AdminToken: "t", RequireSignatures: false, UnsignedTier: "L3"}, configured, true},
+
+		// Loopback demo escape hatch: BOTH the explicit opt-in flag AND a
+		// provably loopback bind are required — each alone must still refuse.
+		{"unsigned L2 + loopback bind + explicit opt-in → allowed",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "127.0.0.1:8090", CircleAllowUnsignedLoopback: true}, configured, false},
+		{"unsigned L2 + localhost bind + explicit opt-in → allowed",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "localhost:8090", CircleAllowUnsignedLoopback: true}, configured, false},
+		{"unsigned L2 + IPv6 loopback bind + explicit opt-in → allowed",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "[::1]:8090", CircleAllowUnsignedLoopback: true}, configured, false},
+		{"unsigned L2 + non-127.0.0.1 loopback (127/8) + explicit opt-in → allowed",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "127.0.0.2:8090", CircleAllowUnsignedLoopback: true}, configured, false},
+		{"unsigned L3 + loopback bind + explicit opt-in → allowed (exemption is per-capability, not per-tier)",
+			config{AdminToken: "t", UnsignedTier: "L3", ListenAddr: "127.0.0.1:8090", CircleAllowUnsignedLoopback: true}, configured, false},
+		{"unsigned L3 + opt-in but 0.0.0.0 bind → still refuses",
+			config{AdminToken: "t", UnsignedTier: "L3", ListenAddr: "0.0.0.0:8090", CircleAllowUnsignedLoopback: true}, configured, true},
+		{"signatures required + loopback + opt-in → allowed via the signature path, exemption unused",
+			config{AdminToken: "t", RequireSignatures: true, UnsignedTier: "L2", ListenAddr: "127.0.0.1:8090", CircleAllowUnsignedLoopback: true}, configured, false},
+		{"unsigned L2 + loopback bind WITHOUT opt-in flag → still refuses",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "127.0.0.1:8090"}, configured, true},
+		{"unsigned L2 + opt-in but 0.0.0.0 bind → still refuses (must NOT regress)",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "0.0.0.0:8090", CircleAllowUnsignedLoopback: true}, configured, true},
+		{"unsigned L2 + opt-in but real-IP bind → still refuses",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "10.0.0.5:8090", CircleAllowUnsignedLoopback: true}, configured, true},
+		{"unsigned L2 + opt-in but empty-host bind :8090 (all interfaces) → still refuses",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: ":8090", CircleAllowUnsignedLoopback: true}, configured, true},
+		{"unsigned L2 + opt-in but empty ListenAddr → still refuses (fail closed)",
+			config{AdminToken: "t", UnsignedTier: "L2", CircleAllowUnsignedLoopback: true}, configured, true},
+		{"unsigned L2 + opt-in but unbracketed IPv6 loopback (unparseable host:port) → still refuses",
+			config{AdminToken: "t", UnsignedTier: "L2", ListenAddr: "::1:8090", CircleAllowUnsignedLoopback: true}, configured, true},
+		{"opt-in + loopback NEVER relaxes the admin-token gate",
+			config{AdminToken: "", UnsignedTier: "L2", ListenAddr: "127.0.0.1:8090", CircleAllowUnsignedLoopback: true}, configured, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1046,6 +1077,34 @@ func TestCheckCircleStartupSafety(t *testing.T) {
 				t.Fatalf("expected no error, got %v", err)
 			}
 		})
+	}
+}
+
+// isLoopbackListenAddr must be fail-closed on every malformed or ambiguous
+// form — a "maybe loopback" answer must never come back true.
+func TestIsLoopbackListenAddr(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:8090", true},
+		{"127.255.255.254:80", true}, // whole 127/8 range is loopback
+		{"localhost:8090", true},
+		{"[::1]:8090", true},
+		{"", false},
+		{"127.0.0.1", false}, // no port — ListenAndServe would reject it anyway; fail closed
+		{":8090", false},     // empty host binds ALL interfaces
+		{"0.0.0.0:8090", false},
+		{"[::]:8090", false}, // IPv6 unspecified binds all interfaces
+		{"10.0.0.5:8090", false},
+		{"::1:8090", false},       // unbracketed IPv6 — unparseable as host:port; fail closed
+		{"LOCALHOST:8090", false}, // only the exact literal is accepted; fail closed
+		{"myhost.internal:8090", false},
+	}
+	for _, c := range cases {
+		if got := isLoopbackListenAddr(c.addr); got != c.want {
+			t.Errorf("isLoopbackListenAddr(%q) = %v, want %v", c.addr, got, c.want)
+		}
 	}
 }
 

@@ -778,6 +778,7 @@ func mcmisc_clearConfigEnvs(t *testing.T) {
 		"UCP_LISTEN_ADDR", "UCP_MERCHANT_BASE_URL",
 		"BUDGET_DEFAULT_CEILING_USD", "BUDGET_HARD_MAX_USD",
 		"UCP_REQUIRE_SIGNATURES", "UCP_ALLOW_DEV_SSRF",
+		"UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK",
 	} {
 		mcmisc_unsetenv(t, k)
 	}
@@ -860,6 +861,28 @@ func TestMCMisc_LoadConfig_AllowDevSSRFFlag(t *testing.T) {
 	cfg := loadConfig()
 	if !cfg.AllowDevSSRF {
 		t.Fatal("UCP_ALLOW_DEV_SSRF=1 must set AllowDevSSRF=true")
+	}
+}
+
+// The Circle loopback opt-in is the only way to start the rail with unsigned
+// checkout enabled, so a typo in the env var name would silently make it
+// unsettable (fail-closed, but the server would refuse to start with no clue
+// why). Pin the exact spelling and the strict "1"-only parse.
+func TestMCMisc_LoadConfig_CircleAllowUnsignedLoopbackFlag(t *testing.T) {
+	mcmisc_clearConfigEnvs(t)
+	cfg := loadConfig()
+	if cfg.CircleAllowUnsignedLoopback {
+		t.Fatal("CircleAllowUnsignedLoopback must default to false (opt-in only)")
+	}
+	for _, v := range []string{"0", "true", "yes", ""} {
+		mcmisc_setenv(t, "UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK", v)
+		if loadConfig().CircleAllowUnsignedLoopback {
+			t.Fatalf("UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=%q must NOT enable the opt-in (only \"1\" does)", v)
+		}
+	}
+	mcmisc_setenv(t, "UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK", "1")
+	if !loadConfig().CircleAllowUnsignedLoopback {
+		t.Fatal("UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1 must set CircleAllowUnsignedLoopback=true")
 	}
 }
 

@@ -25,6 +25,12 @@ type config struct {
 	TierGrants         map[string]string // verified profileURL -> max granted tier
 	UnsignedTier       string            // grant floor for unsigned callers (default L1; L2 = NON-PROD demo)
 	AllowDevSSRF       bool              // #56: UCP_ALLOW_DEV_SSRF=1 permits loopback/private profile fetch (dev/CI only)
+	// CircleAllowUnsignedLoopback: UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1 lets
+	// checkCircleStartupSafety accept the (Circle creds + unsigned checkout
+	// tier) combination ONLY when ListenAddr is provably loopback-bound — an
+	// explicit, greppable operator acknowledgment for supervised demo windows.
+	// The flag alone never weakens anything: a non-loopback bind still refuses.
+	CircleAllowUnsignedLoopback bool
 	// VULN-002 / D1: UCP_PROFILE=prod defaults to RequireSignatures=true.
 	// D2: admin token for /admin/sim/* endpoints (constant-time compare).
 	// When UCP_PROFILE=prod and AdminToken is empty the server refuses to start.
@@ -66,16 +72,17 @@ func loadConfig() config {
 	}
 
 	return config{
-		ListenAddr:         envOr("UCP_LISTEN_ADDR", "127.0.0.1:8090"),
-		BaseURL:            envOr("UCP_MERCHANT_BASE_URL", "http://127.0.0.1:8090"),
-		BudgetCeilingCents: usdCents("BUDGET_DEFAULT_CEILING_USD", 800),
-		BudgetHardMaxCents: usdCents("BUDGET_HARD_MAX_USD", 2000),
-		DefaultTier:        tier,
-		RequireSignatures:  requireSig,
-		TierGrants:         grants,
-		UnsignedTier:       unsigned,
-		AllowDevSSRF:       os.Getenv("UCP_ALLOW_DEV_SSRF") == "1",
-		AdminToken:         adminToken,
+		ListenAddr:                  envOr("UCP_LISTEN_ADDR", "127.0.0.1:8090"),
+		BaseURL:                     envOr("UCP_MERCHANT_BASE_URL", "http://127.0.0.1:8090"),
+		BudgetCeilingCents:          usdCents("BUDGET_DEFAULT_CEILING_USD", 800),
+		BudgetHardMaxCents:          usdCents("BUDGET_HARD_MAX_USD", 2000),
+		DefaultTier:                 tier,
+		RequireSignatures:           requireSig,
+		TierGrants:                  grants,
+		UnsignedTier:                unsigned,
+		AllowDevSSRF:                os.Getenv("UCP_ALLOW_DEV_SSRF") == "1",
+		CircleAllowUnsignedLoopback: os.Getenv("UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK") == "1",
+		AdminToken:                  adminToken,
 	}
 }
 

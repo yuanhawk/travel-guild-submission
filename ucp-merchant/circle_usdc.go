@@ -78,6 +78,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -188,6 +189,20 @@ func (c circleConfig) configured() bool {
 //     see tierCaps in negotiate.go), any unauthenticated caller can drive a
 //     real settlement through the checkout flow, regardless of the admin
 //     token on the OTHER endpoint.
+//
+// Narrow demo escape hatch for gap 2 ONLY: when UCP_LISTEN_ADDR is provably
+// loopback-bound (the exact string handed to http.ListenAndServe — the check
+// and the actual bind cannot diverge) AND the operator has explicitly set
+// UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1, the unsigned-tier refusal is skipped
+// with a loud warning: a loopback listener has no unsigned *internet* callers.
+// Both conditions are required — the env flag alone never weakens a public
+// bind, and a loopback bind alone never silently changes existing behavior.
+// Residual risk the flag is acknowledging (this check CANNOT see it): any
+// co-located local process can reach loopback, and nothing stops someone
+// later putting a forwarder (reverse proxy route, socat, ssh -L) in front of
+// the port. Only set the flag on a single-tenant box you control, for a
+// supervised window, and unset it afterwards. Gap 1 (admin token) is never
+// relaxed.
 func checkCircleStartupSafety(cfg config, circleCfg circleConfig) error {
 	if !circleCfg.configured() {
 		return nil
@@ -199,16 +214,45 @@ func checkCircleStartupSafety(cfg config, circleCfg circleConfig) error {
 	if !cfg.RequireSignatures {
 		for _, c := range tierCaps[cfg.UnsignedTier] {
 			if c == "dev.ucp.shopping.checkout" {
+				if cfg.CircleAllowUnsignedLoopback && isLoopbackListenAddr(cfg.ListenAddr) {
+					log.Printf("WARNING: Circle rail enabled with UCP_UNSIGNED_TIER=%s and signatures "+
+						"disabled, permitted ONLY because UCP_LISTEN_ADDR=%q is loopback-bound and "+
+						"UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1 was explicitly set. ANY local process "+
+						"on this host can now drive a real settlement; do NOT place any forwarder/"+
+						"proxy route in front of this port, and unset the flag after the demo window.",
+						cfg.UnsignedTier, cfg.ListenAddr)
+					return nil
+				}
 				return fmt.Errorf("CIRCLE_* credentials are set, signature verification is disabled "+
 					"(UCP_REQUIRE_SIGNATURES=0 or unset outside UCP_PROFILE=prod), and "+
 					"UCP_UNSIGNED_TIER=%s grants unauthenticated callers checkout capability — "+
 					"refusing to start, since any unsigned caller could drive a real settlement via "+
 					"complete_checkout with settlement_rail=\"circle_usdc\". Set "+
-					"UCP_REQUIRE_SIGNATURES=1 or UCP_UNSIGNED_TIER=L1.", cfg.UnsignedTier)
+					"UCP_REQUIRE_SIGNATURES=1 or UCP_UNSIGNED_TIER=L1 (or, for a supervised "+
+					"loopback-only demo, bind UCP_LISTEN_ADDR to 127.0.0.1 and set "+
+					"UCP_CIRCLE_ALLOW_UNSIGNED_LOOPBACK=1).", cfg.UnsignedTier)
 			}
 		}
 	}
 	return nil
+}
+
+// isLoopbackListenAddr reports whether addr — in the exact host:port form
+// http.ListenAndServe consumes — binds exclusively to a loopback interface.
+// Fail-closed by construction: anything unparseable, an empty addr, an
+// empty host (":8090" binds ALL interfaces), or a hostname other than the
+// literal "localhost" counts as NOT loopback. Accepted forms: "127.0.0.1:p"
+// (and the rest of 127/8), "[::1]:p", "localhost:p".
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // circleHTTPClient is overridable in tests so circle_usdc_test.go can point it at
