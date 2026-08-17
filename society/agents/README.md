@@ -24,7 +24,7 @@ NO-LLM-NUMBERS); only Destination uses a variance-clamped LLM edge.
 ## Gate / safety agents (constrain or veto the plan)
 | file | agent | responsibility |
 |------|-------|----------------|
-| `budget_agent.py` | Budget / Finance (`budget.check` / `budget.commit` / `budget.enforce`) | Two-phase money gate over the UCP merchant; check creates a checkout, commit completes it. Merchant settlement is SIMULATED, AP2 mandate is a real protocol with simulated settlement (no live payment rail). |
+| `budget_agent.py` | Budget / Finance (`budget.check` / `budget.commit` / `budget.enforce`) | Two-phase money gate over the UCP merchant; check creates a checkout, commit completes it. Merchant settlement is SIMULATED by default (AP2/Alipay mandate is a real protocol with simulated settlement, no live payment rail); an opt-in `settlement_rail: "circle_usdc"` triggers a REAL Circle USDC testnet transfer instead — see `ucp-merchant/README.md` § *Circle Agentic Economy Prize integration*. |
 | `critic_agent.py` | Critic / Verifier (`itinerary.verify`) | Hard gate before the single human consent; re-derives every fact from merchant backend data and catches missing-leg / budget regressions. |
 | `insurance_agent.py` | Insurance (`coverage`) | Exclusion-first coverage check against seeded policy terms; proposes the premium line item, never asserts "covered" without enumerating exclusions. |
 | `compliance_agent.py` | Compliance (`eligibility`) | Visa/eVisa entry & lead-time bookability gate by nationality; blocks trips that cannot get a visa in time and proposes a compliant re-sequence + fee line item. |
@@ -32,5 +32,8 @@ NO-LLM-NUMBERS); only Destination uses a variance-clamped LLM edge.
 | `risk_agent.py` | Risk (`risk`) | Off-money-path L1 signal consolidator: seeded cyclone likelihood, median delay, and seismic-resilience planning signals (avoid/buffer/flag windows). |
 | `fraud_agent.py` | Fraud / Counterparty-trust (`fraud`) | Deterministic supplier-solvency gate from a seeded solvency table; constrains which counterparties Budget may commit against (pre-empts supplier insolvency). |
 
-All seeded tables, prices, and merchant settlement here are demo/simulated data
-for the hackathon submission, not live bookings or real financial transactions.
+All seeded tables and prices here are demo data for the hackathon submission,
+not live bookings. Merchant settlement is simulated by default; the real,
+opt-in Circle USDC testnet rail (see `budget_agent.py` above) is the one
+exception where real financial transactions do occur, on-chain, when
+explicitly requested.

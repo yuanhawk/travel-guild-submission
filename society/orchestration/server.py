@@ -1845,6 +1845,7 @@ async def negotiate_text(request: Request) -> JSONResponse:
                         merchant_user_id=merchant_user_id,  # #161
                         memory_verified_user_id=memory_verified_user_id,  # M1 follow-up
                         real_user_id=real_user_id,  # C1 fix
+                        settlement_rail=settlement_rail,
                     )
                 except Exception:
                     # SECURITY: never echo str(exc) to the client — see _run_negotiate's

@@ -517,6 +517,93 @@ func TestCompleteCheckoutWithCircleSettlementRailEndToEnd(t *testing.T) {
 	}
 }
 
+// TestCompleteCheckoutAlreadyCompleteReplaySurfacesSettlementRail — S5/Finding4:
+// replaying complete_checkout on a session that is ALREADY "complete" (the
+// checkout.go branch at "if s.Status == \"complete\"", distinct from the
+// idempotency_key short-circuit above it) must still surface settlement_rail,
+// mirroring that idempotency-key branch's own settlement_rail forwarding and
+// the wallet-balance re-attachment both branches already do. Before the fix,
+// sessionView (which neither branch calls through for this field) carried no
+// settlement_rail, so maybeCircleSettle's "resp[\"settlement_rail\"] != …"
+// gate (circle_usdc.go) silently skipped re-reporting the settlement on this
+// specific replay path.
+func TestCompleteCheckoutAlreadyCompleteReplaySurfacesSettlementRail(t *testing.T) {
+	key := mustTestRSAKey(t)
+	mock, srv := newMockCircleServer(t, key)
+	defer srv.Close()
+
+	origClient, origBase := circleHTTPClient, circleBaseURL
+	circleHTTPClient = srv.Client()
+	circleBaseURL = srv.URL
+	defer func() { circleHTTPClient, circleBaseURL = origClient, origBase }()
+
+	t.Setenv("CIRCLE_API_KEY", "test-api-key")
+	t.Setenv("CIRCLE_ENTITY_SECRET", testEntitySecretHex)
+	t.Setenv("CIRCLE_SOURCE_WALLET_ID", "src-wallet")
+	t.Setenv("CIRCLE_MERCHANT_WALLET_ID", "dst-wallet")
+
+	st := newStore()
+	d, code := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name: "create_checkout",
+		Arguments: coArgs(map[string]any{
+			"user_id":         "u1",
+			"line_items":      []map[string]any{li("bali-alaya-ubud", "2026-07-01", "2026-07-03")},
+			"settlement_rail": "circle_usdc",
+		}),
+	})
+	if code != http.StatusOK || d["status"] != "incomplete" {
+		t.Fatalf("create_checkout: %v", d)
+	}
+	cid := d["id"].(string)
+	dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "update_checkout",
+		Arguments: coArgs(map[string]any{"id": cid, "buyer_consent": true}),
+	})
+
+	// First complete_checkout: commits the booking and triggers the real settle.
+	resp1, code1 := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "complete_checkout",
+		Arguments: coArgs(map[string]any{"id": cid}),
+	})
+	if code1 != http.StatusOK || resp1["status"] != "complete" {
+		t.Fatalf("first complete_checkout: %v", resp1)
+	}
+	settlement1, ok := resp1["circle_settlement"].(map[string]any)
+	if !ok || settlement1["transaction_id"] == "" || settlement1["transaction_id"] == nil {
+		t.Fatalf("expected a real transaction_id on the first booking, got %v", resp1)
+	}
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("expected exactly 1 real transfer call after the first commit, got %d", mock.transferCalls)
+	}
+
+	// Second complete_checkout on the SAME session id, no idempotency_key — this
+	// hits the "s.Status == \"complete\"" replay branch (checkout.go), NOT the
+	// idempotency_key short-circuit. Before the fix, resp2 carried no
+	// settlement_rail at all.
+	resp2, code2 := dispatchTool(testCfg, st, "L2", "agentA", toolCallParams{
+		Name:      "complete_checkout",
+		Arguments: coArgs(map[string]any{"id": cid}),
+	})
+	if code2 != http.StatusOK || resp2["idempotent"] != true {
+		t.Fatalf("replay of an already-complete session must return idempotent=true: %v", resp2)
+	}
+	if resp2["settlement_rail"] != "circle_usdc" {
+		t.Fatalf("S5/Finding4: already-complete replay must surface settlement_rail=circle_usdc, got %v", resp2)
+	}
+	settlement2, ok := resp2["circle_settlement"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected circle_settlement re-reported on the already-complete replay, got %v", resp2)
+	}
+	if settlement2["transaction_id"] != settlement1["transaction_id"] {
+		t.Fatalf("replay must report the SAME settlement, got %v (first was %v)", settlement2, settlement1)
+	}
+	// circleSettle is idempotent per booking_ref — the replay must not trigger
+	// a second real transfer call against Circle.
+	if atomic.LoadInt32(&mock.transferCalls) != 1 {
+		t.Fatalf("already-complete replay must not double-settle; transfer count changed to %d", mock.transferCalls)
+	}
+}
+
 func TestFetchWalletAddressHandlesUpstreamFailures(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/wallets/bad-status", func(w http.ResponseWriter, r *http.Request) {

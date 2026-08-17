@@ -341,8 +341,17 @@ export interface Insurance {
 // see ucp-merchant/circle_usdc.go's maybeCircleSettle. tx_hash/block_explorer_url
 // may be "" if the on-chain hash hadn't appeared yet when the merchant's bounded
 // poll gave up (the transfer itself still succeeded — transaction_id is always
-// set when this object is present at all).
-export interface CircleSettlement {
+// set on the SUCCESS shape).
+//
+// TWO SHAPES (PR #12 audit, Finding2): maybeCircleSettle writes an ERROR object
+// into the SAME circle_settlement key on every failure path (credentials absent /
+// aggregate cap refused / booking_ref amount mismatch / transfer failed). That
+// object carries `error` (+ an optional merchant `note`) and NO status or
+// transaction_id — and the booking itself still committed. Modelled as a
+// discriminated union (mirrors PriceOverlay above) so no caller can render
+// "settled with real USDC" copy for what is actually a refusal.
+export interface CircleSettlementSuccess {
+  error?: undefined;         // discriminant: never present on the success shape
   transaction_id: string;
   status: string;
   tx_hash: string;
@@ -350,6 +359,38 @@ export interface CircleSettlement {
   rail: string;
   network: string;
   note: string;
+}
+export interface CircleSettlementFailure {
+  // 'CIRCLE_NOT_CONFIGURED' | 'exceeds_circle_aggregate_cap' |
+  // 'booking_ref_amount_mismatch' | 'circle_transfer_failed' | …
+  error: string;
+  note?: string;             // merchant-authored explanation, when it supplied one
+  detail?: string;
+}
+export type CircleSettlement = CircleSettlementSuccess | CircleSettlementFailure;
+
+/** Return the settlement IFF it is the genuine SUCCESS shape — present, carrying no
+ *  `error`, and carrying the fields the "settled with real USDC" copy asserts.
+ *  Anything else (absent, or an error object) returns null, so a caller can never
+ *  claim funds moved. Mirrors livePriceOverlay's narrowing pattern above. */
+export function circleSettlementOk(
+  cs: CircleSettlement | null | undefined,
+): CircleSettlementSuccess | null {
+  if (!cs || typeof cs !== 'object') return null;
+  if ((cs as CircleSettlementFailure).error) return null;
+  const ok = cs as CircleSettlementSuccess;
+  if (!ok.status || !ok.transaction_id) return null;
+  return ok;
+}
+
+/** Companion to circleSettlementOk: the FAILURE shape (an `error` code the UI must
+ *  disclose honestly), or null when the field is absent or successful. */
+export function circleSettlementFailure(
+  cs: CircleSettlement | null | undefined,
+): CircleSettlementFailure | null {
+  if (!cs || typeof cs !== 'object') return null;
+  const bad = cs as CircleSettlementFailure;
+  return typeof bad.error === 'string' && bad.error ? bad : null;
 }
 
 // Trip/leg-level (LOW cardinality — #211) + attractions[]/restaurants[]
@@ -565,8 +606,9 @@ export interface NegotiateBody {
                                          // digest (var-0-safe) — see session.ts authFields().
   settlement_rail?: 'circle_usdc';      // Circle Agentic Economy Prize: opt into a REAL
                                          // (not simulated) USDC settlement on this booking.
-                                         // NOT part of the request digest (var-0-safe) —
-                                         // a payment-rail choice, not booking content.
+                                         // IS part of the request digest (see orchestrator.py
+                                         // _request_digest's norm) — two requests differing
+                                         // only in this flag must not collide on idempotency_key.
 }
 
 export interface ConfirmBody { idempotency_key: string; user_id?: string; session_token?: string; owner_token?: string; }

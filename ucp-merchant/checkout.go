@@ -449,6 +449,13 @@ func checkoutTool(cfg config, st *store, tier, agentID, name string, args json.R
 					v["wallet_note"] = walletSimNote
 				}
 			}
+			// Signal the settlement rail so the caller (dispatchTool, AFTER releasing
+			// st.mu) re-confirms/re-reports it — mirrors the idempotency-key replay
+			// branch above and the normal-commit path below. circleSettle is itself
+			// idempotent per booking_ref, so this never double-settles.
+			if s.SettlementRail != "" {
+				v["settlement_rail"] = s.SettlementRail
+			}
 			return v, http.StatusOK
 		}
 		// N1 COUNTERPARTY INSOLVENCY (sim.go): if any line item references a

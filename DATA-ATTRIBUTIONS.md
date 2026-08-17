@@ -64,12 +64,20 @@ describes the sourcing methodology, not data present in this export.
 
 These are the load-bearing "what this is / is not" statements for the submission:
 
-- **Settlement is SIMULATED.** Payment settlement runs in a sandbox only. It is **not a
-  real payment rail** — no money moves. Travel Guild does not book on your behalf; it
-  hands off to an OTA/booking link.
-- **AP2 = mandate protocol + simulated settle.** We implement the AP2 mandate layer (W3C
-  Verifiable Credentials, two-tier mandates), but settlement is **simulated**. This is
-  **NOT a full-AP2-compliant** implementation — there is no live settlement rail
+- **Settlement is SIMULATED by default.** Payment settlement runs in a sandbox
+  by default — no money moves — unless the caller opts into the real Circle
+  USDC rail below.
+- **A real settlement rail also exists (Circle Agentic Economy Prize).** An
+  explicit opt-in (`settlement_rail: "circle_usdc"`, or the web UI's "Settle
+  with real USDC (testnet)" toggle) triggers a genuine Circle
+  Developer-Controlled Wallets USDC transfer on Ethereum Sepolia testnet —
+  real on-chain funds move. See `ucp-merchant/README.md` § *Circle Agentic
+  Economy Prize integration*. This is opt-in only and independent of AP2/Alipay
+  below.
+- **AP2 = mandate protocol + simulated settle (Alipay rail only).** We implement
+  the AP2 mandate layer (W3C Verifiable Credentials, two-tier mandates), but
+  the **Alipay** settlement leg specifically is **simulated**. This is **NOT a
+  full-AP2-compliant** implementation — there is no live Alipay settlement rail
   (Alipay real-rail is KIV, pending a business account).
 - **NHI = long-lived on-disk signing keys.** Non-Human Identity uses long-lived signing
   keys stored on disk (RFC 9421 request signing). There is **no SPIFFE / OIDC / DID /

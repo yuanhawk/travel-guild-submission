@@ -9,6 +9,8 @@
 ucp_signing_*.json
 *secret*
 *token*
+CIRCLE_SETUP.md
+CIRCLE_SEPOLIA_FUNDING.md
 # NOTE: *token* above is meant to catch secret/credential token files, not
 # source code that happens to have "token" in its name — session_token.py is
 # the session-token module itself (code), not a stored secret value.

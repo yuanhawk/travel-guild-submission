@@ -196,6 +196,17 @@ def _request_digest(trip_request: dict) -> str:
         # perturbs it. (The key itself is new, so digests differ from a pre-#54 build;
         # nothing pins historical digest values, so this is inert.)
         "overland_only": bool(trip_request.get("overland_only", False)),
+        # PR #12 audit (S4/Finding7) — settlement_rail participates in request
+        # identity for the SAME reason overland_only does: it changes real
+        # behaviour (a "circle_usdc" booking triggers a REAL on-chain USDC
+        # transfer at commit; the default does not), so two requests differing
+        # ONLY in this flag must NOT collide on one idempotency_key/trip_id —
+        # that would let the merchant's idempotency short-circuit hand one
+        # request's checkout session back for the other. Normalized to "" when
+        # ABSENT (matching self._settlement_rail's own coercion in negotiate()),
+        # so a legacy caller keeps a stable digest and only an explicit rail
+        # perturbs it.
+        "settlement_rail": str(trip_request.get("settlement_rail") or ""),
     }
     blob = json.dumps(norm, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
@@ -2368,9 +2379,11 @@ class TravelOrchestrator:
         )
         self._wallet_session_id = idempotency_key
         # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement
-        # opt-in — deliberately NOT part of _request_digest (like owner_token/
-        # live_emergency): a payment-RAIL choice, not booking content, so it
-        # must never perturb the deterministic trip_id/idempotency_key.
+        # opt-in. PR #12 audit (S4/Finding7) — this IS part of _request_digest
+        # (see the norm dict there): it changes whether a real on-chain transfer
+        # is attempted at commit, so it must not collide with an otherwise
+        # identical non-Circle request on the same idempotency_key. Still fully
+        # deterministic — the digest is a pure function of the request.
         self._settlement_rail = str(trip_request.get("settlement_rail") or "")
         # D7 — capture ONE frozen `today` at negotiate() entry and thread the SAME
         # value into every health/compliance/risk call for the WHOLE run. NO
@@ -7628,6 +7641,15 @@ class TravelOrchestrator:
             "negotiation_log": negotiation_log,
             "negotiation_rounds": rounds,
         }
+        # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement result.
+        # _success_result rebuilds `result` from budget_result with a fixed-key
+        # allowlist, so — exactly like commit_plan's ACCEPTED branch (see the matching
+        # copy-through there) — this MUST be copied explicitly or the atomic
+        # plan+book path silently drops the on-chain proof that budget_agent's
+        # _map_complete_response already surfaced. Absent when the booking didn't opt
+        # into settlement_rail="circle_usdc" → no key, var-0 preserved.
+        if budget_result.get("circle_settlement"):
+            result["circle_settlement"] = budget_result["circle_settlement"]
         # #2 — surface the honest catalog-vs-committed reconciliation when they
         # diverged (Critic-bypassed re-price). Absent when they matched → no key,
         # var-0 preserved for the common (Critic-present) path.
