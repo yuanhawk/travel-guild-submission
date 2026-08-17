@@ -14,11 +14,17 @@ False positives, not real secrets:
    for the RFC 9421 signer, never a real/deployed secret. The current file
    generates its key at runtime; this path allowlist also covers an earlier commit
    that briefly pinned a throwaway test scalar.
+4. ucp-merchant/circle_usdc_test.go — testEntitySecretHex is a fixed 32-byte hex fixture
+   standing in for a real Circle entity secret, used to unit-test entityCiphertext()
+   and checkCircleStartupSafety() offline. Confirmed NOT the real production secret by
+   direct sha256 comparison against the live CIRCLE_ENTITY_SECRET value (mismatched)
+   before this entry was added — see the Circle Agentic Economy Prize PR discussion.
 Real secrets live only in .env files (see .env.example), which are gitignored.
 """
 paths = [
   '''ucp-merchant/AUTH-SPEC\.md''',
   '''society/tests/test_ucp_signing\.py''',
+  '''ucp-merchant/circle_usdc_test\.go''',
 ]
 regexes = [
   '''fresh-consent-[A-Za-z0-9-]+''',

@@ -1764,6 +1764,15 @@ async def negotiate_text(request: Request) -> JSONResponse:
     # the DEMO default (single source) here and thread it into the parsed request.
     body.setdefault("wallet_balance_cents", DEMO_WALLET_DEFAULT_CENTS)
     wallet_balance_cents = body.get("wallet_balance_cents")
+    # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement opt-in.
+    # Only "circle_usdc" is recognized downstream (ucp-merchant/checkout.go); any
+    # other value is threaded through inertly and simply ignored there.
+    settlement_rail = body.get("settlement_rail")
+    if settlement_rail is not None and not isinstance(settlement_rail, str):
+        return JSONResponse(
+            {"error": "invalid request", "detail": "'settlement_rail' must be a string"},
+            status_code=400,
+        )
 
     # #51 — OPT-IN LIVE active-emergency overlay. Opt in per-request ONLY when the
     # board has an EMERGENCY_FEED configured (else None → no key → var-0 no-op). An
@@ -1836,6 +1845,7 @@ async def negotiate_text(request: Request) -> JSONResponse:
                         merchant_user_id=merchant_user_id,  # #161
                         memory_verified_user_id=memory_verified_user_id,  # M1 follow-up
                         real_user_id=real_user_id,  # C1 fix
+                        settlement_rail=settlement_rail,
                     )
                 except Exception:
                     # SECURITY: never echo str(exc) to the client — see _run_negotiate's
@@ -1877,6 +1887,7 @@ async def negotiate_text(request: Request) -> JSONResponse:
                     merchant_user_id=merchant_user_id,  # #161
                     memory_verified_user_id=memory_verified_user_id,  # M1 follow-up
                     real_user_id=real_user_id,  # C1 fix
+                    settlement_rail=settlement_rail,
                 )
             except Exception:
                 # SECURITY: never echo str(exc) to the client — see _run_negotiate's

@@ -85,7 +85,7 @@ veto) carry structured bodies the client still parses.
 | `/confirm` | POST | **The one human consent** — commit a held plan → booked. Idempotent: retrying the same `idempotency_key` never double-books or double-charges. |
 | `/replan` | POST | Item-level deterministic edit lane (remove/add/swap/variant/reflow) on a held OR booked plan. Pure server-side envelope transform; never books or debits. |
 | `/refine` | POST | Conversational follow-up on a held plan (re-plan with truthful diff summary; returns a new `idempotency_key`). |
-| `/cancel` | POST | Void a booked trip and refund the SIMULATED wallet. Idempotent. |
+| `/cancel` | POST | Void a booked trip and refund the SIMULATED wallet. Idempotent. **Known gap:** a real Circle USDC settlement (see below) is **not** auto-reversed on cancel. The Go merchant's raw response flags this (`circle_settlement_not_reversed: true`), but that flag is currently dropped by `budget_agent`/`server.py` before it reaches this API — **the web client and UI do not yet disclose it.** Do not cancel a Circle-settled booking expecting an on-chain refund. |
 | `/trips/{key}` | GET | Restore the stored plan envelope after a page reload. |
 | `/session` · `/preferences` | POST · GET/PUT | Pre-seeded demo travellers (no registration); selecting one replays `user_id` so the backend applies its currency / nationality / persona preset. |
 | `/emergencies` | GET | Live active-emergency overlay (opt-in). |
@@ -135,14 +135,26 @@ whole demo.
 
 ## Honesty notes (must read — these are claims we do NOT overstate)
 
-- **Settlement is SIMULATED.** The prepaid wallet, debits, refunds, and
-  `booking_ref` run in a sandbox — **not a real payment rail**. No real money
-  moves. The UI labels the wallet and booking as simulated.
-- **AP2 = mandate protocol + simulated settle.** AP2 mandate protocol
-  (W3C-VC two-tier) is fully implemented; settlement is **SIMULATED** (no real
-  payment rail wired — a real settlement rail is pending a business account).
-  Full AP2 rail compliance requires real settlement, which is not in scope for
-  this submission.
+- **Settlement is SIMULATED by default.** The prepaid wallet, debits,
+  refunds, and `booking_ref` run in a sandbox — **not a real payment rail** —
+  unless the caller opts into the real rail below. The UI labels the default
+  wallet and booking as simulated.
+- **A real settlement rail also exists (Circle Agentic Economy Prize).**
+  Checking the "Settle with real USDC (testnet)" toggle before confirming a
+  booking sends `settlement_rail: "circle_usdc"`, which triggers a genuine
+  Circle Developer-Controlled Wallets USDC transfer on Ethereum Sepolia
+  testnet — real on-chain funds move, verifiable via the clickable
+  block-explorer link the UI renders on success. This is opt-in only; nothing
+  moves unless the toggle is checked. See `ucp-merchant/README.md` § *Circle
+  Agentic Economy Prize integration* for the full mechanics. The toggle works
+  on both the app's streaming and blocking-fallback negotiate paths.
+- **AP2 = mandate protocol + simulated settle (Alipay rail only).** AP2
+  mandate protocol (W3C-VC two-tier) is fully implemented; the **Alipay**
+  settlement leg specifically is **SIMULATED** (no real payment rail wired —
+  a real Alipay integration is pending a business account). This is
+  independent of the real Circle USDC rail above, which does not go through
+  AP2/Alipay. Full AP2-over-Alipay rail compliance requires real Alipay
+  settlement, which is not in scope for this submission.
 - **NHI = RFC 9421 request signing.** Key material is currently loaded from
   an on-disk EC P-256 PEM (or an ephemeral in-memory key); a KMS-hardening
   seam exists but is not activated in this repo (see the root `ALICLOUD-PROOF.md`

@@ -104,6 +104,17 @@ func main() {
 	// just to report build provenance (mirrors server.py's _GIT_SHA).
 	gitSHA = resolveGitSHA(os.Getenv)
 	cfg := loadConfig()
+	circleCfg := loadCircleConfig()
+	if err := checkCircleStartupSafety(cfg, circleCfg); err != nil {
+		log.Fatal(err)
+	}
+	if circleCfg.configured() {
+		if circleCfg.AggregateCapCents == 0 {
+			log.Printf("WARNING: Circle rail is credentialed but CIRCLE_AGGREGATE_CAP_USD resolves to 0¢ — every settlement will be refused")
+		} else {
+			log.Printf("circle_usdc rail ENABLED (network %s, aggregate cap %d¢ for this process lifetime)", circleNetwork, circleCfg.AggregateCapCents)
+		}
+	}
 	st := newStore()
 	mk, loaded := loadOrCreateKey()
 	if loaded {
@@ -155,6 +166,13 @@ func main() {
 	// POST /admin/sim/alipay/settle {"booking_ref":"...","total_cents":N} → {transaction_id,status:"paid",simulated:true}
 	// GET  /admin/sim/alipay/settle → settlement summary
 	mux.HandleFunc("/admin/sim/alipay/settle", requireAdmin(cfg, alipaySimAdminHandler(st)))
+
+	// Circle Agentic Economy Prize: REAL testnet settlement rail (honestly labeled,
+	// not simulated — genuine HTTP calls to api.circle.com; see circle_usdc.go):
+	// POST /admin/circle/settle {"booking_ref":"...","total_cents":N} → real transfer, or
+	//      501 CIRCLE_NOT_CONFIGURED if CIRCLE_API_KEY/CIRCLE_ENTITY_SECRET unset
+	// GET  /admin/circle/settle → settlement summary
+	mux.HandleFunc("/admin/circle/settle", requireAdmin(cfg, circleAdminHandler(st, cfg.BudgetHardMaxCents)))
 
 	log.Printf("ucp-merchant on %s (ceiling %d¢, hard-max %d¢, default-tier %s, require-sig %v, grants %d)",
 		cfg.ListenAddr, cfg.BudgetCeilingCents, cfg.BudgetHardMaxCents, cfg.DefaultTier, cfg.RequireSignatures, len(cfg.TierGrants))

@@ -17,9 +17,16 @@ deterministic and bounded *by construction* — not by trusting a prompt.**
 > stack still boots and books a real trip end-to-end. Some tuned LLM prompt
 > bodies are replaced with generic placeholders (same JSON contract, different
 > wording) for the same reason — see `agents/*.py` for the inline notes at
-> each redaction. Payment **settlement is SIMULATED** (sandbox checkout, no
-> real payment rail). **AP2** here is the **mandate protocol + simulated
-> settlement — not full-AP2-compliant**. **NHI** signing uses **long-lived
+> each redaction. Payment **settlement is SIMULATED by default** (sandbox
+> checkout, no real payment rail). An **optional real settlement rail** is
+> also included for the **Circle Agentic Economy Prize** track: a genuine
+> Circle Developer-Controlled Wallets USDC transfer on Ethereum Sepolia
+> testnet, gated behind an explicit opt-in (`settlement_rail` field / the
+> web UI's "Settle with real USDC" toggle) — nothing moves unless a caller
+> asks for it. See `ucp-merchant/README.md` § *Circle Agentic Economy Prize
+> integration* for wiring, config, and known limits. **AP2** here is the
+> **mandate protocol + simulated settlement — not full-AP2-compliant**.
+> **NHI** signing uses **long-lived
 > on-disk EC P-256 keys** today (a KMS-hardening seam is documented but not
 > yet activated — see `ALICLOUD-PROOF.md` §KMS). International airfare is
 > **not** in the enforced budget (no GDS/OTA access) — the priced package is
@@ -76,7 +83,9 @@ society/                the agent core (internal codename)
   city_state.json        SAMPLE data (tiny, attributed — see DATA-ATTRIBUTIONS.md)
 ucp-merchant/            Go UCP merchant: real HTTP-403 budget veto, RFC 9421
                          signing, W3C-VC mandate envelopes, simulated
-                         checkout/wallet, world-simulator faults
+                         checkout/wallet by default, opt-in REAL Circle USDC
+                         testnet settlement (Agentic Economy Prize), world-
+                         simulator faults
   catalog.json           SAMPLE data (also a Go compile-time embed)
   food_catalog.json      SAMPLE data (also a Go compile-time embed)
 demo.py / demo.sh        the narrated end-to-end demo — real merchant, real
@@ -124,6 +133,13 @@ deployments require RFC 9421-signed requests instead.
 
 To run the LLM-on edges (intent parse / area ranking / accommodation ranking)
 live against Qwen: set `DASHSCOPE_API_KEY` and see `society/utils/model_router.py`.
+
+To enable the **real** Circle USDC testnet settlement rail (Agentic Economy
+Prize track) instead of the default simulated checkout, set the `CIRCLE_*`
+env vars on the Go merchant and pass `settlement_rail: "circle_usdc"` on
+checkout (or check the web UI's toggle) — see `ucp-merchant/README.md` §
+*Circle Agentic Economy Prize integration* for the full list of required
+vars and safety gates.
 
 ### Running the web dashboard instead of the terminal demo
 

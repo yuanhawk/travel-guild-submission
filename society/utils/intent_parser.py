@@ -6633,6 +6633,7 @@ def negotiate_from_text(
     memory_verified_user_id: str | None = None,
     real_user_id: str | None = None,
     overland_only: bool | None = None,
+    settlement_rail: str | None = None,
 ) -> dict:
     """
     Parse free text → validated request → orchestrator.negotiate().
@@ -6727,6 +6728,11 @@ def negotiate_from_text(
     # structured upstream value always wins.
     if live_emergency is not None and req.get("live_emergency") is None:
         req["live_emergency"] = live_emergency
+    # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement opt-in —
+    # threaded into req exactly like wallet_balance_cents/live_emergency above. A
+    # structured upstream value always wins.
+    if settlement_rail is not None and req.get("settlement_rail") is None:
+        req["settlement_rail"] = settlement_rail
     # Slice 4 — demo-user profile prefs threaded as EXPLICIT request fields. var-0-safe:
     # home_currency is display-only (NOT in _request_digest); the persona-preset
     # interests/dietary/pace pre-fill EMPTY per-leg selections ONLY — a parsed/explicit

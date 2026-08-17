@@ -42,9 +42,69 @@ this showcase.
 - [x] EC P-256 (ES256) **signing_keys** JWK in manifest
 - [x] **RFC 9421** HTTP Message Signature verification (verify-if-present; `UCP_REQUIRE_SIGNATURES=1` enforces) + Content-Digest + agent-profile key resolution
 - [x] **Capability-intersection negotiation** wired as the **L1/L2/L3 autonomy tier gate** (tool dispatch gated on the active set; active caps returned in every response)
-- [x] **`ap2_mandate`** — W3C-VC 2.0 two-tier envelope (CheckoutMandate VC + simulated PaymentMandate); signed budget/expiry consent verified server-side for L3 autonomous `complete_checkout`; settlement is SIMULATED (`simulated:true` labeled in every response)
+- [x] **`ap2_mandate`** — W3C-VC 2.0 two-tier envelope (CheckoutMandate VC + simulated PaymentMandate); signed budget/expiry consent verified server-side for L3 autonomous `complete_checkout`; settlement via the alipay sim rail is SIMULATED (`simulated:true` labeled in every response) — **a REAL settlement rail now also exists, see below**
 - [ ] Swap the sample catalog for a live backend (documented seam, not wired here)
-- [~] W3C-VC 2.0 two-tier mandate shape (CheckoutMandate VC + simulated PaymentMandate) done. Full JsonWebSignature2020 / SD-JWT + RFC 8785 JCS canonicalization and a real payment rail remain future work (needs a live payment-provider business account).
+- [~] W3C-VC 2.0 two-tier mandate shape (CheckoutMandate VC + simulated PaymentMandate) done. Full JsonWebSignature2020 / SD-JWT + RFC 8785 JCS canonicalization remain future work. A real payment rail is **no longer** future work for USDC specifically — see Circle Agentic Economy Prize integration below.
+
+## Circle Agentic Economy Prize integration — REAL, not simulated
+
+Unlike the alipay sim rail above, `circle_usdc.go` makes genuine HTTP calls to
+Circle's Developer-Controlled Wallets API (`api.circle.com`) — a real USDC
+transfer between two developer-controlled wallets on a public testnet
+(Ethereum Sepolia), not a hash-derived fake id. Live-verified end-to-end
+2026-08-17: entity-secret registration, wallet-set/wallet creation, a live
+transfer call, and on-chain confirmation via an independent third-party RPC
+call all completed successfully.
+
+**Two entry points**, both fail-closed by construction (see `main.go`'s
+`checkCircleStartupSafety` — the server refuses to start if the rail is
+configured without an admin token, or without required signatures when the
+unsigned-caller tier grants checkout capability):
+
+1. `POST /admin/circle/settle` (admin-token-gated direct entry point).
+2. **Genuinely agent-driven**: set `checkout.settlement_rail: "circle_usdc"` on
+   `create_checkout`. When that booking's `complete_checkout` commits, a real
+   transfer for the booking's own (budget-enforced) `total_cents` fires
+   automatically — no human manually hits any settlement endpoint.
+
+**Config** (all four required to enable the rail — unset means the rail
+returns an honest `CIRCLE_NOT_CONFIGURED` rather than faking a settlement):
+`CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_SOURCE_WALLET_ID`,
+`CIRCLE_MERCHANT_WALLET_ID`.
+
+Optional: `CIRCLE_AGGREGATE_CAP_USD` — the process-lifetime ceiling on the
+**total** USDC this rail may move across all bookings (default `10000`, i.e.
+$10,000; `0` refuses every settlement; an unparseable value falls back to the
+default rather than to "unbounded" — there is deliberately no unbounded
+setting).
+
+**Spend ceilings — two independent limits.** *Per booking*: a settlement can
+never exceed `BUDGET_HARD_MAX_USD` — the admin endpoint rejects an over-cap
+request outright, and the agent-driven path is bounded by
+`min(user_budget_cents, BUDGET_HARD_MAX_USD)` before the `booking_ref` is even
+generated (same enforcement core as above). *Across bookings*:
+`CIRCLE_AGGREGATE_CAP_USD` caps the cumulative cents this rail may ever move,
+enforced inside `circleSettle` — the single choke point both entry points
+funnel through — by reserving the amount in the same critical section that
+guards against double transfers, i.e. *before* the network call, so N
+concurrent settlements for N different bookings cannot collectively overshoot.
+Idempotent replays of an already-settled `booking_ref` consume no additional
+headroom; attempts that fail upstream or find the rail unconfigured release
+theirs. `GET /admin/circle/settle` reports `aggregate_cap_cents`,
+`aggregate_committed_cents`, and `aggregate_remaining_cents`; a refused
+settlement returns `403 exceeds_circle_aggregate_cap` (admin) or
+`circle_settlement: {"error":"exceeds_circle_aggregate_cap"}` (checkout path).
+
+**Known limitations**: the aggregate counter lives in the in-memory store, so
+it resets on process restart — same lifetime as every other piece of state
+here. It is a per-process ceiling, not a durable lifetime budget; a mainnet
+deployment would need persistent accounting. A booking whose settlement is
+refused by the aggregate cap still completes as a booking — no transfer fires
+and the response says so, the same shape as any other settlement failure,
+rather than silently implying payment. `cancel_checkout` on a booking with a
+real settlement does not reverse the on-chain transfer — it says so
+explicitly in the response (`circle_settlement_not_reversed: true`) rather
+than silently implying otherwise.
 
 ## Test
 Start a server on `:8090` (`go run .`) and hit `/api/ucp/mcp`, or just run

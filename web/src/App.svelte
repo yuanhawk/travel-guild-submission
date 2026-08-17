@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { negotiateText, confirmPlan, refineTrip, centsToUsd, uiState,
            listDemoUsers, getPreferences, isBookedEnvelope, getTrip, cancelTrip, listMyTrips,
-           loginSession, isForbidden, forbiddenMessage, assumptionNotes, tripDateRange } from './lib/api';
+           loginSession, isForbidden, forbiddenMessage, assumptionNotes, tripDateRange,
+           circleSettlementOk, circleSettlementFailure } from './lib/api';
   import type { NegotiateResult, UiState, DemoUser, Preferences as Prefs, EmergenciesResponse } from './lib/api';
   import { downloadIcs } from './lib/ics';
 import { placeSheetOpen } from './lib/mapStore';
@@ -53,6 +54,27 @@ import { placeSheetOpen } from './lib/mapStore';
   import southAfricaThumb from './lib/assets/destinations/thumbs/south-africa.jpg';
 
   let walletUsd = 5000;
+  // Circle Agentic Economy Prize: opt into a REAL (not simulated) USDC
+  // settlement on this booking — see settlement_rail in api.ts. Off by
+  // default (byte-identical to before this feature for anyone who never
+  // touches the toggle).
+  let settleWithCircle = false;
+  /** Honest, user-facing explanation for each merchant-side Circle failure code
+   *  (ucp-merchant/circle_usdc.go, maybeCircleSettle). Never claims funds moved. */
+  function circleErrorCopy(code: string): string {
+    switch (code) {
+      case 'CIRCLE_NOT_CONFIGURED':
+        return 'This server has no Circle credentials configured, so the rail refused to fake a settlement.';
+      case 'exceeds_circle_aggregate_cap':
+        return "The transfer would have pushed this server's cumulative USDC ceiling past its limit, so it was refused.";
+      case 'booking_ref_amount_mismatch':
+        return 'The merchant saw a conflicting amount for this booking reference and refused to transfer.';
+      case 'circle_transfer_failed':
+        return 'The transfer request to Circle did not succeed (details are in the server logs).';
+      default:
+        return 'The settlement did not complete.';
+    }
+  }
   let loading = false;
   let confirming = false;
   let result: NegotiateResult | null = null;
@@ -339,6 +361,12 @@ import { placeSheetOpen } from './lib/mapStore';
   // so the reader doesn't have to parse a sentence to learn the assumed date. null when
   // no leg/day_plan carries dates — mirrors the tripHasDates guard, no fabrication.
   $: planDateRange = tripDateRange(result);
+  // Circle HONESTY GATE (PR #12 audit, Finding2): the merchant puts an ERROR object
+  // (error/note, no status/transaction_id) in the SAME circle_settlement key on every
+  // failure path, so the "settled with real USDC" copy must be gated on the SUCCESS
+  // shape — never on mere presence of the field.
+  $: circleOk = circleSettlementOk(result?.circle_settlement);
+  $: circleFailure = circleSettlementFailure(result?.circle_settlement);
 
   const MY_TRIPS_RE = /\b(my|previous|past|last)\s+(trips?|itinerar(?:y|ies)|bookings?)\b|\bwhat did i book\b|\bretrieve my (?:last |previous )?(?:trip|itinerary|booking)\b/i;
 
@@ -419,6 +447,7 @@ import { placeSheetOpen } from './lib/mapStore';
                        // refineCurrentPlan/"make it cheaper" deliberately does NOT set it
                        // (narration adds ~14-30s on top of an already ~11s call).
       ...(activeUser ? { user_id: activeUser.user_id, nationality: activeUser.nationality } : {}),
+      ...(settleWithCircle ? { settlement_rail: 'circle_usdc' as const } : {}),
     };
     streamRun?.close();
     const run = planStreaming(body, (e) => {
@@ -700,6 +729,11 @@ import { placeSheetOpen } from './lib/mapStore';
     <div class="account-cluster">
       <label class="wallet">$<input type="number" bind:value={walletUsd} min="0" step="100" /></label>
       <span class="divider"></span>
+      <label class="pill-btn circle-toggle" title="Settle this booking with a REAL USDC transfer on Circle's testnet (Ethereum Sepolia) — not simulated.">
+        <input type="checkbox" bind:checked={settleWithCircle} data-testid="circle-settlement-toggle" />
+        💰 Settle with real USDC (testnet)
+      </label>
+      <span class="divider"></span>
       {#if activeUser}
         <button class="pill-btn" data-testid="prefs-link" on:click={openPrefs}>👤 {activeUser.display_name} · {activeUser.user_id} · {activeUser.persona} · {activeUser.home_currency}</button>
       {:else}
@@ -748,6 +782,21 @@ import { placeSheetOpen } from './lib/mapStore';
     {:else if result.booking_ref}
       <b>Booked ✓</b> <span class="ref">{result.booking_ref}</span>
       <span class="sub" data-testid="charged-breakdown">· {centsToUsd(chargeAmount(result))} charged to your wallet (SIMULATED prepaid).{#if feeAmount(result) > 0}{' '}{centsToUsd(feeAmount(result))} in estimated third-party fees (insurance/visa) are not charged by Travel Guild — see the Budget tab.{/if}</span>
+      {#if circleOk}
+        <div class="circle-settlement" data-testid="circle-settlement-result">
+          <b>💰 Settled with real USDC (testnet)</b> — {circleOk.status}
+          {#if circleOk.block_explorer_url}
+            <a href={circleOk.block_explorer_url} target="_blank" rel="noopener noreferrer" data-testid="circle-explorer-link">View on-chain transaction →</a>
+          {:else}
+            <span class="sub">(on-chain hash not yet available — transaction ID: {circleOk.transaction_id})</span>
+          {/if}
+        </div>
+      {:else if circleFailure}
+        <div class="circle-settlement" data-testid="circle-settlement-failed">
+          <b>⚠ No USDC was moved</b> — the real-USDC settlement did not go through ({circleFailure.error}). {circleErrorCopy(circleFailure.error)}
+          <span class="sub">Your booking above still stands and was charged to your SIMULATED prepaid wallet as usual.</span>
+        </div>
+      {/if}
       <button class="summary" data-testid="view-summary" on:click={() => (showPreview = true)}>View trip summary &amp; save to phone →</button>
       <button class="newtrip" data-testid="cancel-booking" on:click={cancelBooking} disabled={cancelling}>{cancelling ? 'Cancelling…' : 'Cancel booking'}</button>
     {/if}
