@@ -650,6 +650,12 @@ class BudgetAgent(A2AAgent):
         # present it is threaded into create_checkout so the merchant binds the
         # session to the wallet for the commit-time debit / cancel-time credit.
         wallet_session_id: str | None = payload.get("wallet_session_id")
+        # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement opt-in.
+        # Threaded into create_checkout exactly like wallet_session_id above — see
+        # checkoutSession.SettlementRail in ucp-merchant/checkout.go. Only
+        # "circle_usdc" is recognized by the merchant; anything else is ignored
+        # there, so no validation is needed on this side.
+        settlement_rail: str | None = payload.get("settlement_rail")
 
         if not user_id:
             raise ValueError("user_id is required")
@@ -683,6 +689,7 @@ class BudgetAgent(A2AAgent):
             autonomy_level=autonomy_level,
             idempotency_key=idempotency_key,
             wallet_session_id=wallet_session_id,
+            settlement_rail=settlement_rail,
         )
 
         return _new_artifact(
@@ -851,6 +858,7 @@ class BudgetAgent(A2AAgent):
         autonomy_level: str,
         idempotency_key: str | None,
         wallet_session_id: str | None = None,
+        settlement_rail: str | None = None,
     ) -> dict[str, Any]:
         """
         SEV-1a CHECK phase: create_checkout only — no complete_checkout.
@@ -861,6 +869,11 @@ class BudgetAgent(A2AAgent):
         When wallet_session_id is supplied it is threaded into create_checkout so
         the merchant binds the session to the SIMULATED prepaid wallet (commit
         debits it; cancel credits it). Absent → no wallet logic (back-compat).
+
+        When settlement_rail is supplied ("circle_usdc") it is threaded into
+        create_checkout so the merchant binds the session to the REAL Circle
+        settlement rail — see ucp-merchant/circle_usdc.go's maybeCircleSettle,
+        triggered at commit time. Absent → no live settlement attempted.
 
         Returns a BudgetCheckResult:
           {decision: "check_ok"|"veto", checkout_id, total_cents, ...}
@@ -878,6 +891,8 @@ class BudgetAgent(A2AAgent):
             }
             if wallet_session_id:
                 _checkout_args["wallet_session_id"] = wallet_session_id
+            if settlement_rail:
+                _checkout_args["settlement_rail"] = settlement_rail
             create_args: dict[str, Any] = {
                 "meta": meta,
                 "checkout": _checkout_args,
@@ -1464,6 +1479,13 @@ class BudgetAgent(A2AAgent):
                 r["wallet_session_id"] = sc.get("wallet_session_id")
                 r["wallet_balance_cents"] = sc.get("wallet_balance_cents")
                 r["wallet_debit_cents"] = sc.get("wallet_debit_cents")
+            # Surface the REAL Circle USDC settlement result (transaction_id,
+            # status, tx_hash, block_explorer_url, rail, network, note — see
+            # maybeCircleSettle in ucp-merchant/circle_usdc.go) so the
+            # orchestrator/web UI can show the genuine on-chain proof. Additive:
+            # absent when the booking didn't opt into settlement_rail="circle_usdc".
+            if sc.get("circle_settlement"):
+                r["circle_settlement"] = sc.get("circle_settlement")
             return r
 
         # M3 — a merchant verdict at COMMIT time that is a DEFINITE, never-

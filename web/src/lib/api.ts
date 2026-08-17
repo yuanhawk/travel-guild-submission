@@ -337,6 +337,20 @@ export interface Insurance {
   premium_money?: Record<string, unknown>; premium_cents?: number;
   coverage?: string; [k: string]: unknown;
 }
+// Circle Agentic Economy Prize: REAL (not simulated) USDC settlement result —
+// see ucp-merchant/circle_usdc.go's maybeCircleSettle. tx_hash/block_explorer_url
+// may be "" if the on-chain hash hadn't appeared yet when the merchant's bounded
+// poll gave up (the transfer itself still succeeded — transaction_id is always
+// set when this object is present at all).
+export interface CircleSettlement {
+  transaction_id: string;
+  status: string;
+  tx_hash: string;
+  block_explorer_url: string;
+  rail: string;
+  network: string;
+  note: string;
+}
 
 // Trip/leg-level (LOW cardinality — #211) + attractions[]/restaurants[]
 // (HIGH-cardinality per-entity portion, mirrored via Attraction.link/
@@ -399,6 +413,7 @@ export interface NegotiateResult {
   min_feasible_total_cents?: number;
   wallet_balance_cents?: number;
   wallet?: Wallet;
+  circle_settlement?: CircleSettlement; // present only when settlement_rail:"circle_usdc" was opted into and the booking committed
   insurance?: Insurance | null;
   health_verdict?: Record<string, unknown> | null;
   booking_ref?: string;
@@ -548,6 +563,10 @@ export interface NegotiateBody {
   owner_token?: string;                 // IDOR fix: anonymous-trip ownership secret, bound
                                          // write-once at creation. NOT part of the request
                                          // digest (var-0-safe) — see session.ts authFields().
+  settlement_rail?: 'circle_usdc';      // Circle Agentic Economy Prize: opt into a REAL
+                                         // (not simulated) USDC settlement on this booking.
+                                         // NOT part of the request digest (var-0-safe) —
+                                         // a payment-rail choice, not booking content.
 }
 
 export interface ConfirmBody { idempotency_key: string; user_id?: string; session_token?: string; owner_token?: string; }

@@ -53,6 +53,11 @@ import { placeSheetOpen } from './lib/mapStore';
   import southAfricaThumb from './lib/assets/destinations/thumbs/south-africa.jpg';
 
   let walletUsd = 5000;
+  // Circle Agentic Economy Prize: opt into a REAL (not simulated) USDC
+  // settlement on this booking — see settlement_rail in api.ts. Off by
+  // default (byte-identical to before this feature for anyone who never
+  // touches the toggle).
+  let settleWithCircle = false;
   let loading = false;
   let confirming = false;
   let result: NegotiateResult | null = null;
@@ -419,6 +424,7 @@ import { placeSheetOpen } from './lib/mapStore';
                        // refineCurrentPlan/"make it cheaper" deliberately does NOT set it
                        // (narration adds ~14-30s on top of an already ~11s call).
       ...(activeUser ? { user_id: activeUser.user_id, nationality: activeUser.nationality } : {}),
+      ...(settleWithCircle ? { settlement_rail: 'circle_usdc' as const } : {}),
     };
     streamRun?.close();
     const run = planStreaming(body, (e) => {
@@ -700,6 +706,11 @@ import { placeSheetOpen } from './lib/mapStore';
     <div class="account-cluster">
       <label class="wallet">$<input type="number" bind:value={walletUsd} min="0" step="100" /></label>
       <span class="divider"></span>
+      <label class="pill-btn circle-toggle" title="Settle this booking with a REAL USDC transfer on Circle's testnet (Ethereum Sepolia) — not simulated.">
+        <input type="checkbox" bind:checked={settleWithCircle} data-testid="circle-settlement-toggle" />
+        💰 Settle with real USDC (testnet)
+      </label>
+      <span class="divider"></span>
       {#if activeUser}
         <button class="pill-btn" data-testid="prefs-link" on:click={openPrefs}>👤 {activeUser.display_name} · {activeUser.user_id} · {activeUser.persona} · {activeUser.home_currency}</button>
       {:else}
@@ -748,6 +759,16 @@ import { placeSheetOpen } from './lib/mapStore';
     {:else if result.booking_ref}
       <b>Booked ✓</b> <span class="ref">{result.booking_ref}</span>
       <span class="sub" data-testid="charged-breakdown">· {centsToUsd(chargeAmount(result))} charged to your wallet (SIMULATED prepaid).{#if feeAmount(result) > 0}{' '}{centsToUsd(feeAmount(result))} in estimated third-party fees (insurance/visa) are not charged by Travel Guild — see the Budget tab.{/if}</span>
+      {#if result.circle_settlement}
+        <div class="circle-settlement" data-testid="circle-settlement-result">
+          <b>💰 Settled with real USDC (testnet)</b> — {result.circle_settlement.status}
+          {#if result.circle_settlement.block_explorer_url}
+            <a href={result.circle_settlement.block_explorer_url} target="_blank" rel="noopener noreferrer" data-testid="circle-explorer-link">View on-chain transaction →</a>
+          {:else}
+            <span class="sub">(on-chain hash not yet available — transaction ID: {result.circle_settlement.transaction_id})</span>
+          {/if}
+        </div>
+      {/if}
       <button class="summary" data-testid="view-summary" on:click={() => (showPreview = true)}>View trip summary &amp; save to phone →</button>
       <button class="newtrip" data-testid="cancel-booking" on:click={cancelBooking} disabled={cancelling}>{cancelling ? 'Cancelling…' : 'Cancel booking'}</button>
     {/if}

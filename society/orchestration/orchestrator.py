@@ -805,6 +805,11 @@ class TravelOrchestrator:
         # legacy tests funded without changing the var-0 request identity.
         self._wallet_balance_cents: int = DEMO_WALLET_DEFAULT_CENTS
         self._wallet_session_id: str = ""
+        # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement
+        # opt-in — "" (default) means no live settlement attempted (back-compat).
+        # Set from trip_request in negotiate(), same lifecycle as
+        # _wallet_session_id above. See _run_negotiation_rounds's check_payload.
+        self._settlement_rail: str = ""
         # L2 — see the day-planner block in _run_negotiation_rounds + _success_result.
         self._day_plan_error: str | None = None
 
@@ -2362,6 +2367,11 @@ class TravelOrchestrator:
             trip_request.get("wallet_balance_cents") or DEMO_WALLET_DEFAULT_CENTS
         )
         self._wallet_session_id = idempotency_key
+        # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement
+        # opt-in — deliberately NOT part of _request_digest (like owner_token/
+        # live_emergency): a payment-RAIL choice, not booking content, so it
+        # must never perturb the deterministic trip_id/idempotency_key.
+        self._settlement_rail = str(trip_request.get("settlement_rail") or "")
         # D7 — capture ONE frozen `today` at negotiate() entry and thread the SAME
         # value into every health/compliance/risk call for the WHOLE run. NO
         # wall-clock read here: the value is taken verbatim from trip_request (or
@@ -3452,6 +3462,16 @@ class TravelOrchestrator:
             "debit_cents": bres.get("wallet_debit_cents"),
             "note": "Charged to your SIMULATED prepaid wallet on confirm.",
         }
+        # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement result
+        # — transaction_id, status, tx_hash, block_explorer_url, rail, network, note
+        # (see ucp-merchant/circle_usdc.go's maybeCircleSettle). commit_plan
+        # reconstructs `env` field-by-field rather than passing bres through
+        # verbatim (see the wallet block above for the established pattern), so
+        # this MUST be copied explicitly too or it is silently dropped here even
+        # though budget_agent._map_complete_response already surfaced it on bres.
+        # Absent when the booking didn't opt into settlement_rail="circle_usdc".
+        if bres.get("circle_settlement"):
+            env["circle_settlement"] = bres["circle_settlement"]
         env.pop("_confirm_ctx", None)
         self._emit_wallet_debit(bres)
         return env
@@ -6142,6 +6162,11 @@ class TravelOrchestrator:
                 # session at create time so the commit-time debit / cancel-time credit
                 # know which wallet. Empty → no wallet logic (back-compat).
                 "wallet_session_id": self._wallet_session_id,
+                # Circle Agentic Economy Prize: REAL (not simulated) USDC settlement
+                # opt-in, threaded through exactly like wallet_session_id above — see
+                # checkoutSession.SettlementRail in ucp-merchant/checkout.go. Empty →
+                # no live settlement attempted (back-compat).
+                "settlement_rail": self._settlement_rail,
             }
             try:
                 try:
