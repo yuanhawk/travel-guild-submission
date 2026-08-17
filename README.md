@@ -33,11 +33,11 @@ deterministic and bounded *by construction* — not by trusting a prompt.**
 > the in-destination *bookable* package, not the full trip cost.
 
 > **Circle Agentic Economy Prize — proof of a real, live USDC settlement:**
-> agent wallet `0x776244b38e4f99cd24bbecf7047be6309ffad787`, transaction
-> [`sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61`](https://sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61)
-> (Ethereum Sepolia testnet, independently verified on-chain). Full mechanics
-> and the agent-driven (not admin-manual) entry point: `ucp-merchant/README.md`
-> § *Circle Agentic Economy Prize integration*.
+> demo video (toggle-driven, no admin endpoint): [youtu.be/h2mEdbEKWRw](https://youtu.be/h2mEdbEKWRw).
+> Agent wallet `0x776244b38e4f99cd24bbecf7047be6309ffad787`, transaction
+> [`sepolia.etherscan.io/tx/0x4f17b70b0083d8b6a8b2e4f45fd08a805f7966405d6d492e2e8d44dd405c2001`](https://sepolia.etherscan.io/tx/0x4f17b70b0083d8b6a8b2e4f45fd08a805f7966405d6d492e2e8d44dd405c2001)
+> (Ethereum Sepolia testnet, independently verified on-chain). Full mechanics:
+> `ucp-merchant/README.md` § *Circle Agentic Economy Prize integration*.
 
 ---
 
