@@ -56,6 +56,17 @@ transfer between two developer-controlled wallets on a public testnet
 transfer call, and on-chain confirmation via an independent third-party RPC
 call all completed successfully.
 
+**Proof of live settlement (Circle Agentic Economy Prize eligibility artifacts):**
+- Agent (source) Circle wallet address: `0x776244b38e4f99cd24bbecf7047be6309ffad787`
+- A real settled transaction, verifiable on-chain: [`sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61`](https://sepolia.etherscan.io/tx/0x2c3e39d9b10e5a8159273ca9abea1ce6928d227a3ee23dee19a90e8f879c2e61)
+  (5.000000 USDC, confirmed independently via a direct `eth_getTransactionReceipt`
+  RPC call showing `status: 0x1` and a genuine ERC-20 `Transfer` event — not
+  merely Circle's own reporting).
+- Network: Ethereum Sepolia testnet (`ETH-SEPOLIA`).
+- This transaction was fired via the admin entry point during integration
+  testing; the same code path (`maybeCircleSettle`) also fires automatically
+  from a real, toggle-driven web UI booking — see the demo recording.
+
 **Two entry points**, both fail-closed by construction (see `main.go`'s
 `checkCircleStartupSafety` — the server refuses to start if the rail is
 configured without an admin token, or without required signatures when the
