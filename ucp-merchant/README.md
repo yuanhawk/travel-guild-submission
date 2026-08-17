@@ -42,9 +42,42 @@ this showcase.
 - [x] EC P-256 (ES256) **signing_keys** JWK in manifest
 - [x] **RFC 9421** HTTP Message Signature verification (verify-if-present; `UCP_REQUIRE_SIGNATURES=1` enforces) + Content-Digest + agent-profile key resolution
 - [x] **Capability-intersection negotiation** wired as the **L1/L2/L3 autonomy tier gate** (tool dispatch gated on the active set; active caps returned in every response)
-- [x] **`ap2_mandate`** — W3C-VC 2.0 two-tier envelope (CheckoutMandate VC + simulated PaymentMandate); signed budget/expiry consent verified server-side for L3 autonomous `complete_checkout`; settlement is SIMULATED (`simulated:true` labeled in every response)
+- [x] **`ap2_mandate`** — W3C-VC 2.0 two-tier envelope (CheckoutMandate VC + simulated PaymentMandate); signed budget/expiry consent verified server-side for L3 autonomous `complete_checkout`; settlement via the alipay sim rail is SIMULATED (`simulated:true` labeled in every response) — **a REAL settlement rail now also exists, see below**
 - [ ] Swap the sample catalog for a live backend (documented seam, not wired here)
-- [~] W3C-VC 2.0 two-tier mandate shape (CheckoutMandate VC + simulated PaymentMandate) done. Full JsonWebSignature2020 / SD-JWT + RFC 8785 JCS canonicalization and a real payment rail remain future work (needs a live payment-provider business account).
+- [~] W3C-VC 2.0 two-tier mandate shape (CheckoutMandate VC + simulated PaymentMandate) done. Full JsonWebSignature2020 / SD-JWT + RFC 8785 JCS canonicalization remain future work. A real payment rail is **no longer** future work for USDC specifically — see Circle Agentic Economy Prize integration below.
+
+## Circle Agentic Economy Prize integration — REAL, not simulated
+
+Unlike the alipay sim rail above, `circle_usdc.go` makes genuine HTTP calls to
+Circle's Developer-Controlled Wallets API (`api.circle.com`) — a real USDC
+transfer between two developer-controlled wallets on a public testnet
+(Ethereum Sepolia), not a hash-derived fake id. Live-verified end-to-end
+2026-08-17: entity-secret registration, wallet-set/wallet creation, a live
+transfer call, and on-chain confirmation via an independent third-party RPC
+call all completed successfully.
+
+**Two entry points**, both fail-closed by construction (see `main.go`'s
+`checkCircleStartupSafety` — the server refuses to start if the rail is
+configured without an admin token, or without required signatures when the
+unsigned-caller tier grants checkout capability):
+
+1. `POST /admin/circle/settle` (admin-token-gated direct entry point).
+2. **Genuinely agent-driven**: set `checkout.settlement_rail: "circle_usdc"` on
+   `create_checkout`. When that booking's `complete_checkout` commits, a real
+   transfer for the booking's own (budget-enforced) `total_cents` fires
+   automatically — no human manually hits any settlement endpoint.
+
+**Config** (all four required to enable the rail — unset means the rail
+returns an honest `CIRCLE_NOT_CONFIGURED` rather than faking a settlement):
+`CIRCLE_API_KEY`, `CIRCLE_ENTITY_SECRET`, `CIRCLE_SOURCE_WALLET_ID`,
+`CIRCLE_MERCHANT_WALLET_ID`.
+
+**Known limitation**: no aggregate spend ceiling across bookings yet, only
+per-booking (bounded by `BUDGET_HARD_MAX_USD`, same enforcement core as
+above). `cancel_checkout` on a booking with a real settlement does not
+reverse the on-chain transfer — it says so explicitly in the response
+(`circle_settlement_not_reversed: true`) rather than silently implying
+otherwise.
 
 ## Test
 Start a server on `:8090` (`go run .`) and hit `/api/ucp/mcp`, or just run

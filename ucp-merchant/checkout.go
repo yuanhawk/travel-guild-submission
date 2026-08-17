@@ -93,6 +93,13 @@ type checkoutSession struct {
 	// per-run request digest). Empty → ALL wallet logic is skipped (backward-
 	// compat: responses are byte-identical to pre-wallet behaviour).
 	WalletSessionID string `json:"-"`
+	// SettlementRail selects a REAL settlement rail for complete_checkout,
+	// triggered AFTER st.mu is released (see maybeCircleSettle in
+	// circle_usdc.go — the rail makes live network calls, which must never
+	// run while holding the store lock). "" → no live settlement attempted
+	// (byte-identical to pre-Circle behaviour). Currently only "circle_usdc"
+	// is recognized; anything else is ignored.
+	SettlementRail string `json:"-"`
 }
 
 type store struct {
@@ -105,6 +112,8 @@ type store struct {
 	counterpartyInsolvent map[string]bool         // N1 sim: counterparty_id -> insolvent → bookings VOID (sim.go)
 	alipaySettlements map[string]alipaySettlement // #57 AP2 sim: booking_ref -> SIMULATED settlement (alipay_sim.go)
 	wallets           map[string]*wallet          // SIMULATED prepaid wallet: wallet_session_id -> balance+ledger (wallet.go)
+	circleSettlements map[string]circleSettlement // Circle Agentic Economy: booking_ref -> REAL testnet settlement (circle_usdc.go)
+	circleInFlight    map[string]chan struct{}     // booking_ref -> close-when-done, guards against concurrent double-transfer (circle_usdc.go)
 }
 
 func newStore() *store {
@@ -117,6 +126,8 @@ func newStore() *store {
 		counterpartyInsolvent: map[string]bool{},
 		alipaySettlements: map[string]alipaySettlement{},
 		wallets:           map[string]*wallet{},
+		circleSettlements: map[string]circleSettlement{},
+		circleInFlight:    map[string]chan struct{}{},
 	}
 }
 
@@ -250,6 +261,10 @@ func checkoutTool(cfg config, st *store, tier, agentID, name string, args json.R
 			// session binds to this wallet so complete debits / cancel credits it.
 			WalletSessionID    string `json:"wallet_session_id"`
 			WalletBalanceCents int64  `json:"wallet_balance_cents"`
+			// SettlementRail opts a checkout into a REAL settlement rail at
+			// complete_checkout — currently "circle_usdc" (see circle_usdc.go).
+			// Additive: "" (the default) skips this entirely.
+			SettlementRail string `json:"settlement_rail"`
 		} `json:"checkout"`
 	}
 	_ = json.Unmarshal(args, &a)
@@ -310,6 +325,7 @@ func checkoutTool(cfg config, st *store, tier, agentID, name string, args json.R
 			// SIMULATED prepaid wallet binding — persisted so complete/cancel know
 			// which wallet to draw down / refund. Empty → no wallet logic (back-compat).
 			WalletSessionID: c.WalletSessionID,
+			SettlementRail:  c.SettlementRail,
 		}
 		st.mu.Lock()
 		st.sessions[s.ID] = s
@@ -380,6 +396,12 @@ func checkoutTool(cfg config, st *store, tier, agentID, name string, args json.R
 								v["simulated"] = true
 								v["wallet_note"] = walletSimNote
 							}
+						}
+						// Signal the settlement rail so the caller (dispatchTool, AFTER
+						// releasing st.mu) re-confirms/re-reports it — circleSettle is
+						// itself idempotent per booking_ref, so this never double-settles.
+						if prev.SettlementRail != "" {
+							v["settlement_rail"] = prev.SettlementRail
 						}
 						return v, http.StatusOK
 					}
@@ -613,6 +635,12 @@ func checkoutTool(cfg config, st *store, tier, agentID, name string, args json.R
 			v["simulated"] = true
 			v["wallet_note"] = walletSimNote
 		}
+		// Signal a REAL settlement rail for the caller to trigger AFTER st.mu is
+		// released — see the SettlementRail field comment and maybeCircleSettle
+		// in circle_usdc.go. Additive: SettlementRail=="" → unchanged.
+		if s.SettlementRail != "" {
+			v["settlement_rail"] = s.SettlementRail
+		}
 		return v, http.StatusOK
 
 	case "cancel_checkout":
@@ -668,6 +696,18 @@ func checkoutTool(cfg config, st *store, tier, agentID, name string, args json.R
 				resp["simulated"] = true
 				resp["wallet_note"] = walletSimNote
 			}
+		}
+		// HONESTY: unlike the simulated wallet above, a completed Circle
+		// settlement is a REAL on-chain transfer — cancel_checkout has no
+		// reversal/refund mechanism for it (that would require its own
+		// outbound Circle transfer, not built). Say so explicitly rather than
+		// silently cancelling the booking while real funds stay moved. This
+		// also means a fresh complete_checkout on a NEW booking_ref for the
+		// same itinerary triggers an independent, separately-real transfer.
+		if wasCompleted && s.SettlementRail == "circle_usdc" {
+			resp["circle_settlement_not_reversed"] = true
+			resp["circle_settlement_note"] = "this booking had a REAL circle_usdc settlement; " +
+				"cancelling the booking does not reverse or refund that on-chain transfer"
 		}
 		return resp, http.StatusOK
 	}

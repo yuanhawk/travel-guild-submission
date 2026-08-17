@@ -217,7 +217,13 @@ func dispatchTool(cfg config, st *store, tier, agentID string, p toolCallParams)
 		// Pass st so the sim availability state gates catalog results.
 		return catalogToolWithStore(st, p.Name, p.Arguments)
 	case "create_checkout", "update_checkout", "complete_checkout", "cancel_checkout":
-		return checkoutTool(cfg, st, tier, agentID, p.Name, p.Arguments)
+		resp, code := checkoutTool(cfg, st, tier, agentID, p.Name, p.Arguments)
+		if p.Name == "complete_checkout" && code == http.StatusOK {
+			// MUST run after checkoutTool has returned (st.mu released) — see
+			// circle_usdc.go's module header and maybeCircleSettle doc comment.
+			resp = maybeCircleSettle(st, resp)
+		}
+		return resp, code
 	case "sim_set_availability":
 		// L3 World Simulator control: mark hotel available/unavailable.
 		return dispatchSimTool(st, p)
